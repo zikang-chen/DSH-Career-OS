@@ -3,6 +3,7 @@ import { capturePageJson, capturePageText } from './browser.js'
 import { fetchJdDetail, resolveJdProvider } from './jd.js'
 import {captureNowcoder} from './nowcoder.js'
 import {processKnowledgeOcr} from './ocr.js'
+import {ResearchBudget,boundedResearch} from './research-budget.js'
 import { classifyRecruitType, filterByRecruitType, getSiteProfile, normalizeRecruitType } from './sites.js'
 
 const sourceForSite = (site) => ({boss:'job_board','51job':'job_board',xhs:'social_platform',offershow:'offershow'})[site]
@@ -51,8 +52,21 @@ export async function fetchXhsNoteBody(item, {dataDir,captureJson = capturePageJ
   return {ok:true,desc:text.slice(0,20000),media,source:'note-detail-dom'}
 }
 
-export async function captureSite(args = {}, {config,repos,panel,logger,captureJson = capturePageJson,fetchDetail = fetchJdDetail,fetchNoteBody = fetchXhsNoteBody} = {}) {
-  if(args.site==='nowcoder') return captureNowcoder(args,{config,repos,panel})
+export async function captureSite(args = {}, deps = {}) {
+  const budget=deps.budget??new ResearchBudget({maxVisits:6,timeoutMs:90000,signal:deps.signal})
+  const config=deps.config
+  const capture=deps.captureJson??capturePageJson, detail=deps.fetchDetail??fetchJdDetail, note=deps.fetchNoteBody??fetchXhsNoteBody
+  const run=()=>captureSiteInternal(args,{...deps,budget,
+    captureJson:opts=>budget.visit('搜索 '+args.site,ctx=>capture({...opts,timeoutMs:Math.min(opts.timeoutMs??20000,ctx.timeoutMs),signal:ctx.signal})),
+    fetchDetail:opts=>budget.visit('岗位JD详情',ctx=>detail({...opts,timeoutMs:Math.min(opts.timeoutMs??14000,ctx.timeoutMs),signal:ctx.signal})),
+    fetchNoteBody:(item,opts)=>budget.visit('面经正文',()=>note(item,opts)),
+  }).then(result=>({...result,budget:budget.summary()}))
+  // 只缓存只读预览；确认入库是单独授权，不能被预览缓存吞掉写操作。
+  if(args.dryRun!==false && !deps.captureJson){const key=JSON.stringify([config?.dataDir,args.site,args.keyword,args.url,args.city,args.recruitType,args.fillJd,args.fillJdLimit,args.bodyLimit]);return boundedResearch(key,run,{force:args.force===true})}
+  return run()
+}
+async function captureSiteInternal(args = {}, {config,repos,panel,logger,budget,captureJson = capturePageJson,fetchDetail = fetchJdDetail,fetchNoteBody = fetchXhsNoteBody} = {}) {
+  if(args.site==='nowcoder') return budget.visit('牛客搜索与正文',ctx=>captureNowcoder({...args,bodyLimit:Math.min(args.bodyLimit??2,2)},{config,repos,panel,signal:ctx.signal}))
   const profile = getSiteProfile(args.site)
   if (!profile) return {ok:false,stage:'validation',error:'未知站点（xhs/boss/51job/offershow）'}
   let wantType,limit,jdLimit,bodyLimit,timeoutMs,plan,targetUrl
@@ -137,6 +151,7 @@ export async function captureSite(args = {}, {config,repos,panel,logger,captureJ
     if (jdFailures.length) base.warnings.push(`${jdFailures.length} 条JD未取回，不计入JD成功数；详情错误不会当作正文保存。`)
     base.preview=limited.slice(0,20).map(it=>({...it,recruitType:classifyRecruitType(it)}))
     if (args.dryRun !== false) return finish({...base,next:'当前是预览，未写岗位/笔记/时间线；确认后 dryRun=false 写入。'})
+    budget.check()
     if (!repos) throw new Error('缺少数据仓库，无法入库')
     if (profile.kind === 'job') {
       const postings = limited.map(it=>({company:it.company,title:it.title,location:it.location,salaryText:it.salaryText,jobCode:it.jobCode,url:it.url,applyUrl:it.url,
@@ -173,7 +188,7 @@ export async function captureSite(args = {}, {config,repos,panel,logger,captureJ
       const knowledgeItem=repos.knowledge?.upsert({kind:'interview',title:it.title,company:args.company??null,role:args.role??null,platform:'xiaohongshu',url:it.url,publishedAt:it.publishedAt,body:it.desc??'',completeness:it.bodyStatus==='detail'?'full':'summary',evidenceLevel:'C',media:(it.media?.images??[]).map(image=>({...image,ocrStatus:'pending'})),sourceEntityType:'forum_post',sourceEntityId:post.id})
       if(args.autoOcr===true && knowledgeItem) for(let imageIndex=0;imageIndex<knowledgeItem.media.length && ocrProcessed<5;imageIndex++){
         if(knowledgeItem.media[imageIndex].ocrStatus==='reviewed')continue
-        const result=await processKnowledgeOcr({id:knowledgeItem.id,index:imageIndex+1},{repos,config})
+        const result=await budget.visit('图片本地识别',()=>processKnowledgeOcr({id:knowledgeItem.id,index:imageIndex+1},{repos,config}))
         ocrProcessed++
         if(!result.ok)ocrFailures.push({title:it.title,index:imageIndex+1,error:result.image?.error})
       }

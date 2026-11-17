@@ -30,6 +30,71 @@ export function mapJob(row) {
   return out
 }
 
+function jobPagination(filter = {}) {
+  return {
+    limit: Math.max(1, Math.min(500, Math.trunc(num(filter.limit) ?? 100))),
+    offset: Math.max(0, Math.trunc(num(filter.offset) ?? 0)),
+  }
+}
+
+/**
+ * Shared, parameterized full-table predicate for listing and counting.
+ * Keyword tokens are ANDed, with each token allowed in any searchable field.
+ * gradYear only uses explicit years in grade_limit; unknown eligibility is kept
+ * by default (includeUnknown=false opts into known-year matches only).
+ */
+export function buildJobQuery(filter = {}) {
+  const clauses = []
+  const params = []
+  const add = (sql, ...values) => { clauses.push(sql); params.push(...values) }
+  const inList = (column, value) => {
+    if (!value) return
+    const values = arr(value)
+    if (values.length) add(`${column} IN (${values.map(() => '?').join(',')})`, ...values)
+  }
+  if (filter.archived !== true) clauses.push('archived = 0')
+  if (filter.companyId) add('company_id = ?', filter.companyId)
+  inList('status', filter.status)
+  inList('internship_type', filter.internshipType)
+  inList('recruit_type', filter.recruitType)
+  inList('remote_type', filter.remoteType)
+  const cities = arr(filter.location)
+  if (cities.length) add(`(${cities.map(() => 'location LIKE ?').join(' OR ')})`, ...cities.map((city) => `%${city}%`))
+  if (filter.company) add('company_name LIKE ?', `%${filter.company}%`)
+  if (filter.deadlineBefore) add('deadline IS NOT NULL AND deadline <= ?', filter.deadlineBefore)
+  if (filter.minScore !== undefined && filter.minScore !== null) add('match_score IS NOT NULL AND match_score >= ?', num(filter.minScore))
+  if (filter.skill) add('skills LIKE ?', `%${filter.skill}%`)
+  if (filter.since) add('created_at >= ?', filter.since)
+  if (filter.updatedAfter) add('updated_at >= ?', filter.updatedAfter)
+  if (typeof filter.jdComplete === 'boolean') {
+    const complete = "(length(trim(coalesce(description, ''), char(9,10,11,12,13,32,12288))) > 0 AND length(trim(coalesce(requirements, ''), char(9,10,11,12,13,32,12288))) > 0)"
+    clauses.push(filter.jdComplete ? complete : `NOT ${complete}`)
+  }
+  if (num(filter.daysPerWeekMax) !== null) add('days_per_week IS NOT NULL AND days_per_week <= ?', num(filter.daysPerWeekMax))
+  if (num(filter.gradYear) !== null) {
+    const year = Math.trunc(num(filter.gradYear))
+    // Normalize common range separators, then scan explicit four-digit years.
+    // A list such as 2026/2028 is NOT widened into a 2026–2028 range.
+    let grade = "coalesce(grade_limit, '')"
+    for (const separator of [' ', '年', '届']) grade = `replace(${grade}, '${separator}', '')`
+    for (const separator of ['至', '到', '~', '～', '—', '–', '－']) grade = `replace(${grade}, '${separator}', '-')`
+    const yearPattern = '20[0-9][0-9]'
+    const match = `EXISTS (WITH RECURSIVE grade_parts(rest) AS (
+      SELECT ${grade} UNION ALL SELECT substr(rest, 2) FROM grade_parts WHERE length(rest) > 4
+    ) SELECT 1 FROM grade_parts WHERE
+      (substr(rest, 1, 4) GLOB '${yearPattern}' AND CAST(substr(rest, 1, 4) AS INTEGER) = ?)
+      OR (substr(rest, 1, 9) GLOB '${yearPattern}-${yearPattern}'
+        AND ? BETWEEN CAST(substr(rest, 1, 4) AS INTEGER) AND CAST(substr(rest, 6, 4) AS INTEGER)))`
+    if (filter.includeUnknown !== false) add(`(${match} OR coalesce(grade_limit, '') NOT GLOB '*${yearPattern}*')`, year, year)
+    else add(match, year, year)
+  }
+  const fields = ['title', 'company_name', 'description', 'requirements', 'location']
+  for (const token of String(filter.query ?? '').trim().split(/\s+/).filter(Boolean)) {
+    add(`(${fields.map((field) => `${field} LIKE ?`).join(' OR ')})`, ...fields.map(() => `%${token}%`))
+  }
+  return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params }
+}
+
 export class JobRepo {
   constructor(db, log) {
     this.db = db
@@ -260,7 +325,7 @@ export class JobRepo {
    */
   effectiveStatus(job, official) {
     if (job.status && job.status !== 'UNKNOWN') return job.status
-    return official ? 'OPEN' : 'UNVERIFIED'
+    return 'UNVERIFIED' // 官方页面存在只证明已发现岗位，不自动证明当前开放。
   }
 
   /**
@@ -275,7 +340,14 @@ export class JobRepo {
     let next = current
     let changed = false
 
-    if (official) {
+    if (!['OPEN','CLOSED','UPCOMING','UNVERIFIED','STALE','UNKNOWN'].includes(String(status))) throw new Error('无效招聘状态')
+    const verifiedClaim = official === true && ['OPEN','CLOSED','UPCOMING'].includes(status)
+    if(verifiedClaim && (!/^https:\/\//i.test(String(sourceUrl??'')) || !String(evidence??'').trim())) {
+      // 历史/导入调用缺官方摘录时降为待核验，不伪造一次新官方核验。
+      if(current==='UNKNOWN') {this.db.run('UPDATE job SET status=?,updated_at=? WHERE id=?',['UNVERIFIED',at,jobId]);return {previous:current,status:'UNVERIFIED',changed:true,official:false,warning:'缺少官方来源链接或开放/关闭证据摘录'}}
+      return {previous:current,status:current,changed:false,official:false,warning:'未更新核验：缺少官方来源链接或状态证据摘录'}
+    }
+    if (official && (verifiedClaim || status==='STALE')) {
       if (status && status !== current) { next = status; changed = true }
       this.db.run('UPDATE job SET status = ?, status_verified_at = ?, status_source = ?, updated_at = ? WHERE id = ?',
         [next, at, sourceUrl ?? sourceType ?? null, at, jobId])
@@ -288,7 +360,7 @@ export class JobRepo {
       // third-party observations never refresh status_verified_at
     }
 
-    if (changed) {
+    if (changed || verifiedClaim) {
       this.db.run(`INSERT INTO job_status_history (id, job_id, status, previous_status, source_type, source_url, evidence, verified_at, note, created_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [uuid(), jobId, next, current, sourceType ?? null, sourceUrl ?? null, evidence ?? null, official ? at : (job.status_verified_at ?? at), note ?? null, at])
@@ -441,68 +513,31 @@ export class JobRepo {
     return this.db.get('SELECT * FROM job_note WHERE id = ?', [id])
   }
 
+  buildJobQuery(filter = {}) { return buildJobQuery(filter) }
+
   listJobs(filter = {}, profile = null) {
-    const where = []
-    const params = []
-    if (filter.archived !== true) where.push('archived = 0')
-    if (filter.companyId) { where.push('company_id = ?'); params.push(filter.companyId) }
-    if (filter.status) {
-      const list = arr(filter.status)
-      where.push(`status IN (${list.map(() => '?').join(',')})`)
-      params.push(...list)
-    }
-    if (filter.internshipType) {
-      const list = arr(filter.internshipType)
-      where.push(`internship_type IN (${list.map(() => '?').join(',')})`)
-      params.push(...list)
-    }
-    if (filter.location) { where.push("(location LIKE ? OR location LIKE ?)"); params.push(`%${filter.location}%`, '%远程%') }
-    if (filter.company) { where.push('company_name LIKE ?'); params.push(`%${filter.company}%`) }
-    if (filter.deadlineBefore) { where.push('deadline IS NOT NULL AND deadline <= ?'); params.push(filter.deadlineBefore) }
-    if (filter.minScore !== undefined && filter.minScore !== null) { where.push('match_score IS NOT NULL AND match_score >= ?'); params.push(num(filter.minScore)) }
-    if (filter.skill) { where.push('skills LIKE ?'); params.push(`%${filter.skill}%`) }
-    if (filter.recruitType) {
-      const list = arr(filter.recruitType)
-      where.push(`recruit_type IN (${list.map(() => '?').join(',')})`)
-      params.push(...list)
-    }
-    if (filter.since) { where.push('created_at >= ?'); params.push(filter.since) }
-
-    let ids = null
-    if (filter.query) {
-      const hits = this.searchJobIds(filter.query, 400)
-      if (!hits.length) return []
-      ids = hits
-      where.push(`id IN (${ids.map(() => '?').join(',')})`)
-      params.push(...ids)
-    }
-
-    const limit = Math.min(num(filter.limit) ?? 100, 500)
-    const offset = Math.max(num(filter.offset) ?? 0, 0)
-    const sql = `SELECT * FROM job ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-                 ORDER BY coalesce(match_score, -1) DESC, updated_at DESC LIMIT ? OFFSET ?`
-    const rows = this.db.all(sql, [...params, limit, offset]).map(mapJob)
-    return rows
+    const { where, params } = this.buildJobQuery(filter)
+    const { limit, offset } = jobPagination(filter)
+    return this.db.all(`SELECT * FROM job ${where}
+      ORDER BY coalesce(match_score, -1) DESC, updated_at DESC, id ASC LIMIT ? OFFSET ?`,
+    [...params, limit, offset]).map(mapJob)
   }
 
-  /** FTS5 MATCH when the tokenizer supports CJK, else a LIKE scan. */
+  /** Count the complete filtered set, independent of the requested page. */
+  countJobs(filter = {}) {
+    const { where, params } = this.buildJobQuery(filter)
+    return Number(this.db.scalar(`SELECT count(*) FROM job ${where}`, params) ?? 0)
+  }
+
+  queryPage(filter = {}) {
+    const { limit, offset } = jobPagination(filter)
+    return { items: this.listJobs({ ...filter, limit, offset }), total: this.countJobs(filter), limit, offset }
+  }
+
+  /** Same token semantics as listJobs; no capped ID prefetch in filtered queries. */
   searchJobIds(query, limit = 100) {
-    const q = String(query ?? '').trim()
-    if (!q) return []
-    if (this.db.ftsMode === 'trigram' && [...q].length >= 3) {
-      try {
-        const escaped = q.replace(/"/g, '""')
-        const rows = this.db.all('SELECT job_id FROM job_fts WHERE job_fts MATCH ? LIMIT ?', [`"${escaped}"`, limit])
-        if (rows.length) return rows.map((r) => r.job_id)
-      } catch {
-        /* fall through to LIKE */
-      }
-    }
-    const like = `%${q}%`
-    const rows = this.db.all(
-      'SELECT id FROM job WHERE title LIKE ? OR company_name LIKE ? OR description LIKE ? OR requirements LIKE ? OR location LIKE ? LIMIT ?',
-      [like, like, like, like, like, limit])
-    return rows.map((r) => r.id)
+    if (!String(query ?? '').trim()) return []
+    return this.listJobs({ query, limit, archived: true }).map((row) => row.id)
   }
 
   // ── matching ───────────────────────────────────────────────────────────────

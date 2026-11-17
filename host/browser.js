@@ -92,7 +92,7 @@ async function cdpVersion(port, timeoutMs = 1500) {
  * 启动（或复用）专用浏览器。
  * @returns {{ok:boolean, port:number|null, executable:string|null, profileDir:string, started:boolean, error?:string}}
  */
-export async function ensureBrowser({ dataDir, logger, extraArgs = [], noProxy = false } = {}) {
+export async function ensureBrowser({ dataDir, logger, extraArgs = [], noProxy = false, foreground = false } = {}) {
   const profileDir = browserProfileDir(dataDir)
   const previous = readBrowserState(dataDir)
   if (previous?.port) {
@@ -125,13 +125,14 @@ export async function ensureBrowser({ dataDir, logger, extraArgs = [], noProxy =
     '--no-default-browser-check',
     '--disable-features=Translate,msEdgeSidebarV2,msShoppingHub',
     '--window-size=1280,900',
+    ...(!foreground ? ['--start-minimized'] : []),
     // 默认遵循系统代理；仅显式 noProxy:true 才直连，不静默改用户的网络路线。
     ...(noProxy ? ['--no-proxy-server'] : []),
     ...extraArgs,
     'about:blank',
   ]
   try {
-    const child = spawn(executable, args, { detached: true, stdio: 'ignore', windowsHide: false })
+    const child = spawn(executable, args, { detached: true, stdio: 'ignore', windowsHide: !foreground })
     child.unref()
   } catch (err) {
     return { ok: false, port: null, executable, profileDir, started: false, error: String(err?.message ?? err) }
@@ -355,7 +356,7 @@ async function pageSummary(cdp, sessionId) {
  */
 export async function capturePageJson({
   dataDir, url, matchUrl, patterns = ['job', 'post', 'position', 'search', 'campus', 'recruit'],
-  prefer = null, validateJson, search, timeoutMs = 25000, logger,
+  prefer = null, validateJson, search, signal, timeoutMs = 25000, logger,
 } = {}) {
   const browser = await ensureBrowser({ dataDir, logger })
   if (!browser.ok) return { ok: false, error: browser.error, browser }
@@ -397,7 +398,7 @@ export async function capturePageJson({
 
     if (!targetId) {
       if (!url) return { ok: false, error: '既没有可复用的标签页，也没给 url', browser }
-      const created = await cdp.send('Target.createTarget', { url: 'about:blank' })
+      const created = await cdp.send('Target.createTarget', { url: 'about:blank', background: true })
       targetId = created.targetId
       attached = await cdp.send('Target.attachToTarget', { targetId, flatten: true })
     }
@@ -430,6 +431,7 @@ export async function capturePageJson({
     const started = Date.now()
     const budget = Math.max(4000, Math.min(Number(timeoutMs) || 25000, 60000))
     while (Date.now() - started < budget) {
+      if(signal?.aborted)throw new Error('研究已取消')
       await sleep(250)
       const best = watcher.best()
       // 没拿到真正的数据不能因一个配置/登录响应就提前成功。
@@ -458,7 +460,7 @@ export async function capturePageJson({
 }
 
 /** 读一个页面的渲染后正文（用于详情页是服务端渲染、接口抓不到的情况）。 */
-export async function capturePageText({ dataDir, url, selectors = [], timeoutMs = 18000, logger } = {}) {
+export async function capturePageText({ dataDir, url, selectors = [], timeoutMs = 18000, signal, logger } = {}) {
   const browser = await ensureBrowser({ dataDir, logger })
   if (!browser.ok) return { ok: false, error: browser.error }
   const info = await cdpVersion(browser.port)
@@ -466,7 +468,7 @@ export async function capturePageText({ dataDir, url, selectors = [], timeoutMs 
   const cdp = await new CdpConnection(info.webSocketDebuggerUrl).connect()
   let targetId
   try {
-    ;({ targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' }))
+    ;({ targetId } = await cdp.send('Target.createTarget', { url: 'about:blank', background: true }))
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true })
     await cdp.send('Page.enable', {}, sessionId)
     await cdp.send('Page.navigate', { url }, sessionId)
@@ -474,6 +476,7 @@ export async function capturePageText({ dataDir, url, selectors = [], timeoutMs 
     const started = Date.now()
     let page = null
     while (Date.now() - started < Math.max(4000, Math.min(timeoutMs || 18000, 45000))) {
+      if(signal?.aborted)throw new Error('研究已取消')
       await sleep(650)
       const r = await cdp.send('Runtime.evaluate', { expression, returnByValue: true }, sessionId, 3000).catch(() => null)
       if (!r?.result?.value) continue
@@ -494,7 +497,7 @@ export async function capturePageText({ dataDir, url, selectors = [], timeoutMs 
 
 /** 只开窗口让用户登录，不抓取。 */
 export async function openForLogin({ dataDir, url, logger }) {
-  const browser = await ensureBrowser({ dataDir, logger, extraArgs: url ? [url] : [] })
+  const browser = await ensureBrowser({ dataDir, logger, foreground: true, extraArgs: url ? [url] : [] })
   if (!browser.ok) return { ok: false, error: browser.error }
   if (!browser.started && url) {
     // 复用已有实例时，用 CDP 新开一个标签页
@@ -502,7 +505,10 @@ export async function openForLogin({ dataDir, url, logger }) {
     if (info?.webSocketDebuggerUrl) {
       const cdp = await new CdpConnection(info.webSocketDebuggerUrl).connect()
       try {
-        await cdp.send('Target.createTarget', { url })
+        const target = await cdp.send('Target.createTarget', { url, background: false })
+        const win = await cdp.send('Browser.getWindowForTarget', { targetId: target.targetId })
+        await cdp.send('Browser.setWindowBounds', { windowId: win.windowId, bounds: { windowState: 'normal' } })
+        await cdp.send('Target.activateTarget', { targetId: target.targetId })
       } finally {
         cdp.close()
       }

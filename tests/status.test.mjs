@@ -15,12 +15,12 @@ describe('status semantics on import', () => {
     } finally { env.cleanup() }
   })
 
-  it('explicit official import may be OPEN', () => {
+  it('official source without explicit opening evidence stays UNVERIFIED', () => {
     const env = makeEnv()
     try {
       env.repos.jobs.importPostings(postings, { company: '某某公司', pageUrl: 'https://x/campus', official: true })
       const job = env.repos.jobs.listJobs({ limit: 10 })[0]
-      assert.equal(job.status, 'OPEN')
+      assert.equal(job.status, 'UNVERIFIED')
     } finally { env.cleanup() }
   })
 })

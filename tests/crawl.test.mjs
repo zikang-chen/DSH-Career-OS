@@ -176,7 +176,7 @@ describe('bulk import into the job store', () => {
       const pmJob = env.db.get("SELECT location FROM job WHERE title = '产品经理实习生'")
       assert.equal(dataJob.location, '北京')
       assert.equal(pmJob.location, '上海')
-      assert.equal(dataJob.status, 'OPEN', 'official page => official status evidence')
+      assert.equal(dataJob.status, 'UNVERIFIED', 'official page presence alone does not prove current opening')
       const urls = env.repos.jobs.applyUrls(dataJob.id)
       assert.ok(urls.includes('https://jobs.example.com/p/1'))
     } finally {

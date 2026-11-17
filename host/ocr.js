@@ -37,7 +37,7 @@ export async function downloadVisibleImage({url,dataDir}){
  const c=await new CdpConnection(info.webSocketDebuggerUrl).connect()
  let targetId,off
  try{
-  ;({targetId}=await c.send('Target.createTarget',{url:'about:blank'}))
+  ;({targetId}=await c.send('Target.createTarget',{url:'about:blank',background:true}))
   const {sessionId}=await c.send('Target.attachToTarget',{targetId,flatten:true})
   const images=new Map();let imageBody=null
   off=c.on(m=>{

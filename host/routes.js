@@ -20,6 +20,7 @@ import { SITE_PROFILES, getSiteProfile, loginUrlForConnector } from './sites.js'
 import { captureSite, sourceHealthRows } from './site-capture.js'
 import {processKnowledgeOcr,ocrStatus} from './ocr.js'
 import {syncKnowledgeIndex} from './knowledge-sync.js'
+import {assessJob360} from './assessment.js'
 import { capturePageJson, openForLogin } from './browser.js'
 import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
@@ -132,20 +133,26 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
 
   route('GET', '/jobs', ({ query }) => {
     const profile = repos.profile.getWithResume()
-    const rows = repos.jobs.listJobs({
+    const page = repos.jobs.queryPage({
       query: query.get('query') ?? undefined,
       status: query.get('status') ? query.get('status').split(',') : undefined,
       company: query.get('company') ?? undefined,
       location: query.get('location') ?? undefined,
       internshipType: query.get('type') ? query.get('type').split(',') : undefined,
+      recruitType: query.get('recruitType') ? query.get('recruitType').split(',') : undefined,
+      jdComplete: query.has('jdComplete') ? query.get('jdComplete') === 'true' : undefined,
+      remoteType: query.get('remoteType') ? query.get('remoteType').split(',') : undefined,
+      gradYear:query.get('gradYear')||undefined,daysPerWeekMax:query.get('daysPerWeekMax')||undefined,
       skill: query.get('skill') ?? undefined,
       minScore: query.get('minScore') ?? undefined,
       deadlineBefore: query.get('deadlineBefore') ?? undefined,
       limit: Number(query.get('limit') ?? 100),
       offset: Number(query.get('offset') ?? 0),
-    }, profile)
+    })
+    const rows=page.items
     return {
       ok: true,
+      total:page.total,limit:page.limit,offset:page.offset,
       count: rows.length,
       scope: '仅本地已入库岗位；未访问第三方招聘平台',
       jobs: rows.map((j) => ({
@@ -167,7 +174,9 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
     if (!id) throw new HttpError('缺少 id')
     const job = repos.jobs.getJob(id)
     if (!job) throw new HttpError('岗位不存在', 404)
-    return { ok: true, job, statusLabel: STATUS_LABEL[job.status] }
+    const knowledge=repos.knowledge.list({company:job.company_name,limit:30}).items
+    const assessment=assessJob360({job,profile:repos.profile.getWithResume(),experiences:repos.profile.listExperiences(),knowledge})
+    return { ok: true, job, assessment, relatedKnowledge:knowledge, statusLabel: STATUS_LABEL[job.status] }
   })
 
   route('GET', '/resume/quality', ({ query }) => {

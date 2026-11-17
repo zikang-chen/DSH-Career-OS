@@ -36,7 +36,7 @@ describe('job truth and identity across the career pipeline',()=>{
   })
   it('lets third party fill missing fields, never overwrite official JD while leaving OPEN',()=>{
     const e=makeEnv();try{
-      const x=e.repos.jobs.upsertJob({company:'示例公司',title:'产品经理',jobCode:'A',description:'官方职责',requirements:'官方要求',applyUrl:'https://official.test/job',recruitType:'campus',status:'OPEN'},
+      const x=e.repos.jobs.upsertJob({company:'示例公司',title:'产品经理',jobCode:'A',description:'官方职责',requirements:'官方要求',applyUrl:'https://official.test/job',recruitType:'campus',status:'OPEN',statusEvidence:'官方岗位正在招聘'},
         {official:true,source:{sourceType:'official_careers'}})
       e.repos.jobs.upsertJob({company:'示例公司',title:'产品经理',jobCode:'A',description:'第三方旧职责',requirements:'第三方要求',url:'https://third.test/job',applyUrl:'https://third.test/job',location:'上海',recruitType:'intern'},
         {official:false,source:{sourceType:'job_board'}})

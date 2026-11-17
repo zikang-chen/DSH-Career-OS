@@ -219,7 +219,7 @@ describe('job status verification', () => {
     const env = makeEnv()
     try {
       const { id } = env.repos.jobs.upsertJob(
-        { company: '丁公司', title: '战略实习生', status: 'OPEN', url: 'https://c.example.com/1' },
+        { company: '丁公司', title: '战略实习生', status: 'OPEN', statusEvidence:'官方页面明确显示正在招聘及投递入口', url: 'https://c.example.com/1' },
         { official: true, source: { sourceType: 'official_careers', url: 'https://c.example.com/1' } },
       )
       let job = env.repos.jobs.getJob(id)
@@ -237,7 +237,7 @@ describe('job status verification', () => {
       // one entry for the initial UNKNOWN→OPEN confirmation, one for OPEN→CLOSED
       assert.equal(history.length, 2)
 
-      env.repos.jobs.applyStatusObservation(id, { status: 'OPEN', official: true, sourceType: 'official_careers' })
+      env.repos.jobs.applyStatusObservation(id, { status: 'OPEN', official: true, sourceType: 'official_careers', sourceUrl:'https://c.example.com/1', evidence:'重新开放申请' })
       assert.equal(env.repos.jobs.getJob(id).history.length, 3, 'every transition is appended')
     } finally {
       env.cleanup()
@@ -263,7 +263,7 @@ describe('job status verification', () => {
     const env = makeEnv()
     try {
       const { id } = env.repos.jobs.upsertJob(
-        { company: '己公司', title: '投资实习生', status: 'OPEN', url: 'https://f.example.com/1' },
+        { company: '己公司', title: '投资实习生', status: 'OPEN', statusEvidence:'官方页面明确显示正在招聘', url: 'https://f.example.com/1' },
         { official: true, source: { sourceType: 'official_careers', url: 'https://f.example.com/1' } },
       )
       // A freshly verified job must survive the policy check.

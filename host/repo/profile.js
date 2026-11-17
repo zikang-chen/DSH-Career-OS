@@ -112,7 +112,7 @@ export class ProfileRepo {
   hash() {
     const p = this.getWithResume()
     const material = [p.school, p.major, p.grad_year, p.weekly_days, p.remote_pref, p.cities, p.target_industries,
-      p.target_roles, p.target_companies, p.excluded, p.skills, p.preferences, (p.resumeDigest ?? '').length]
+      p.target_roles, p.target_companies, p.excluded, p.skills, p.preferences, p.availability_start, p.availability_end, p.degree, p.resumeDigest ?? '']
     let h = 0
     const s = JSON.stringify(material)
     for (let i = 0; i < s.length; i += 1) h = (h * 31 + s.charCodeAt(i)) >>> 0

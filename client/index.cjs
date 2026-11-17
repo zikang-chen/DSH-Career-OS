@@ -261,6 +261,16 @@ function GlobalStyles() {
 .careeros-root ::-webkit-scrollbar { width: 9px; height: 9px }
 .careeros-root ::-webkit-scrollbar-thumb { background: ${T.border2}; border-radius: 8px }
 .careeros-nav button { text-align: left; width: 100% }
+.careeros-root button:focus-visible, .careeros-root [role=button]:focus-visible { outline:2px solid ${T.accent}; outline-offset:2px }
+@media (max-width: 768px) {
+ .careeros-nav { width:132px !important; padding:6px !important }
+ .career-radar-results .career-radar-table { display:none !important }
+ .career-radar-results .career-radar-cards { display:flex !important }
+}
+@media (max-width: 480px) {
+ .careeros-nav { width:96px !important; font-size:12px }
+ .careeros-root main { padding:10px !important }
+}
 `)
 }
 
@@ -572,7 +582,7 @@ function ResumeTab({ bootstrap, onChanged }) {
 }
 
 // ─── Internship Radar ────────────────────────────────────────────────────────
-// List-only filters deliberately operate on the current /jobs response, not the whole database.
+// All browse conditions are applied by /jobs to the local database before pagination.
 const radarStatusLabels = { OPEN: '官方在招', UPCOMING: '即将开放', UNVERIFIED: '待核实', STALE: '待重新核验', CLOSED: '已关闭', UNKNOWN: '状态未知' }
 const radarRecruitLabels = { autumn_campus: '秋招', spring_campus: '春招', summer: '暑期实习', daily: '日常实习', campus: '校招', social: '社招', intern: '实习', other: '其他' }
 function radarValue(job, camel, snake = camel) { return job[camel] ?? job[snake] }
@@ -587,6 +597,13 @@ function radarFilter(jobs, { city = '', recruit = '', completeOnly = false } = {
     && (!recruit || radarValue(job, 'recruitType', 'recruit_type') === recruit)
     && (!completeOnly || radarJD(job).complete))
 }
+function radarAssessmentText(value) {
+  if (value === null || value === undefined || value === '') return '未知'
+  if (typeof value === 'boolean') return value ? '是' : '否'
+  if (Array.isArray(value)) return value.length ? value.map(radarAssessmentText).join('；') : '未知'
+  if (typeof value === 'object') return Object.entries(value).map(([key, item]) => `${key}: ${radarAssessmentText(item)}`).join(' · ') || '未知'
+  return String(value)
+}
 function RadarTab({ focusCode, onChanged, onNavigate }) {
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('')
@@ -594,6 +611,16 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
   const [city, setCity] = useState('')
   const [recruit, setRecruit] = useState('')
   const [completeOnly, setCompleteOnly] = useState(false)
+  const [remoteType, setRemoteType] = useState('')
+  const [gradYear, setGradYear] = useState('')
+  const [daysPerWeekMax, setDaysPerWeekMax] = useState('')
+  const [offset, setOffset] = useState(0)
+  const limit = 20
+  const [viewMode, setViewMode] = useState('table')
+  const [assessment, setAssessment] = useState(null)
+  const [verifySourceUrl, setVerifySourceUrl] = useState('')
+  const [verifyEvidence, setVerifyEvidence] = useState('')
+  const changeCondition = (setter, value) => { setOffset(0); setter(value) }
   const tracking = useRef(false)
   const detailRequest = useRef(0)
   const [trackingBusy, setTrackingBusy] = useState(false)
@@ -617,7 +644,14 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
     if (query) params.set('query', query)
     if (status) params.set('status', status)
     if (minScore) params.set('minScore', minScore)
-    params.set('limit', '120')
+    if (city.trim()) params.set('location', city.trim())
+    if (recruit) params.set('recruitType', recruit)
+    if (completeOnly) params.set('jdComplete', 'true')
+    if (remoteType) params.set('remoteType', remoteType)
+    if (gradYear) params.set('gradYear', gradYear)
+    if (daysPerWeekMax) params.set('daysPerWeekMax', daysPerWeekMax)
+    params.set('limit', String(limit))
+    params.set('offset', String(offset))
     setError(null)
     setLoading(true)
     const request = ++loadRequest.current
@@ -625,17 +659,20 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
       if (request === loadRequest.current) setList(res)
     }).catch((err) => { if (request === loadRequest.current) setError(err.message) })
       .finally(() => { if (request === loadRequest.current) setLoading(false) })
-  }, [query, status, minScore])
+  }, [query, status, minScore, city, recruit, completeOnly, remoteType, gradYear, daysPerWeekMax, offset])
 
   useEffect(load, [load])
 
   const openDetail = useCallback((id) => {
     setSelected(id)
     setDetail(null)
+    setAssessment(null)
+    setVerifySourceUrl('')
+    setVerifyEvidence('')
     setDetailOpen(true)
     const request = ++detailRequest.current
     apiGet(`/job?id=${encodeURIComponent(id)}`).then((res) => {
-      if (request === detailRequest.current) setDetail(res.job)
+      if (request === detailRequest.current) { setDetail(res.job); setAssessment(res.assessment ?? null) }
     }).catch((err) => { if (request === detailRequest.current) setError(err.message) })
   }, [])
 
@@ -662,8 +699,15 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
 
   const verify = async (nextStatus, official) => {
     if (!selected) return
+    if (official && (!/^https:\/\/\S+$/i.test(verifySourceUrl.trim()) || !verifyEvidence.trim())) {
+      setError('官方状态核验需要 HTTPS 官方来源链接与原文证据摘录；尚未修改状态。')
+      return
+    }
     try {
-      await apiPost('/job/verify', { id: selected, status: nextStatus, official })
+      const res = await apiPost('/job/verify', { id: selected, status: nextStatus, official, sourceUrl: verifySourceUrl.trim() || undefined, evidence: verifyEvidence.trim() || undefined })
+      const warning = res.warning ?? res.result?.warning
+      if (warning) { setError(warning); return }
+      setError(null)
       openDetail(selected)
       load()
     } catch (err) {
@@ -697,12 +741,28 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
     }
   }
 
-  const visibleJobs = radarFilter(list?.jobs ?? [], { city, recruit, completeOnly })
+  const visibleJobs = list?.jobs ?? []
+  const total = list?.total ?? 0
+  const pageOffset = list?.offset ?? offset
+  const pageCount = list?.count ?? visibleJobs.length
+  const cellStyle = { padding: '8px 10px', textAlign: 'left', verticalAlign: 'top', borderBottom: `1px solid ${T.border}` }
+  const tableBody = h('div', { className: 'career-radar-table', style: { overflowX: 'auto', display: viewMode === 'table' ? 'block' : 'none' } },
+    h('table', { style: { width: '100%', minWidth: 920, borderCollapse: 'collapse', ...S.body } },
+      h('thead', null, h('tr', null, ['公司', '岗位', '类型', '城市', '状态', '截止', 'JD', '核验 / 操作'].map((label) => h('th', { key: label, scope: 'col', style: cellStyle }, label)))),
+      h('tbody', null, visibleJobs.map((job) => h('tr', { key: job.id, style: { background: selected === job.id ? 'rgba(37,99,235,0.05)' : undefined } },
+        h('td', { style: cellStyle }, radarText(job.company ?? job.company_name)),
+        h('td', { style: cellStyle }, h('button', { type: 'button', onClick: () => openDetail(job.id), style: { border: 0, background: 'none', color: T.accent, cursor: 'pointer', textAlign: 'left', padding: 0 } }, radarText(job.title))),
+        h('td', { style: cellStyle }, radarRecruitLabels[radarValue(job, 'recruitType', 'recruit_type')] ?? '未知'),
+        h('td', { style: cellStyle }, radarText(job.location)),
+        h('td', { style: cellStyle }, h(Chip, { tone: statusTone(job.status) }, radarStatusLabels[job.status] ?? '状态未知')),
+        h('td', { style: cellStyle }, job.deadline ? fmtDate(job.deadline) : '未知'),
+        h('td', { style: cellStyle }, radarJD(job).label),
+        h('td', { style: cellStyle }, h('div', { style: S.muted }, job.statusVerifiedAt || job.status_verified_at ? relTime(job.statusVerifiedAt ?? job.status_verified_at) : '核验未知'), h(Btn, { kind: 'ghost', onClick: () => openDetail(job.id) }, '详情 / 核验')))))))
   const listBody = list === null
     ? (error ? h(Empty, { title: '岗位加载失败', hint: '请刷新重试；没有把请求失败当作零岗位。' }) : h(Loading))
     : visibleJobs.length === 0
-      ? h(Empty, { title: '当前加载页没有符合条件的岗位', hint: '可清除城市、招聘类型或完整 JD 条件，或调整关键词重新检索本地库；此处不代表全库或全网没有岗位。' })
-      : h('div', { style: S.col }, visibleJobs.map((job) => h('div', {
+      ? h(Empty, { title: total === 0 ? '本地岗位库没有符合条件的岗位' : '本页暂无岗位', hint: '可调整条件重新检索或返回上一页；仅覆盖已入库的本地岗位，不代表全网没有岗位。' })
+      : h('div', { className: `career-radar-results career-radar-view-${viewMode}` }, tableBody, h('div', { className: 'career-radar-cards', style: { ...S.col, display: viewMode === 'card' ? 'flex' : 'none' } }, visibleJobs.map((job) => h('div', {
           key: job.id,
           role: 'button', tabIndex: 0,
           onClick: () => openDetail(job.id),
@@ -727,7 +787,7 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
             h('div', { style: { ...S.row, gap: 6 } },
               h(Chip, { tone: statusTone(job.status) }, radarStatusLabels[job.status] ?? job.statusLabel ?? '状态未知'),
               h(Score, { value: job.matchScore }))),
-        )))
+        ))))
 
   return h('div', { style: S.col },
     error ? h('div', { style: { ...S.card, borderColor: T.error, ...S.muted, color: T.error } }, error) : null,
@@ -739,20 +799,32 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
       h('div', { style: { ...S.row, flexWrap: 'wrap', justifyContent: 'space-between' } },
         h('div', { style: S.h2 }, '岗位库'),
         h('div', { style: { ...S.row, flexWrap: 'wrap' } },
-          h('input', { style: { ...S.input, width: 190 }, value: query, onChange: (e) => setQuery(e.target.value), placeholder: '搜索公司/岗位/JD 关键词' }),
-          h('select', { style: { ...S.input, width: 130 }, value: status, onChange: (e) => setStatus(e.target.value) },
+          h('input', { style: { ...S.input, width: 190 }, value: query, onChange: (e) => changeCondition(setQuery, e.target.value), placeholder: '搜索公司/岗位/JD 关键词' }),
+          h('select', { style: { ...S.input, width: 130 }, value: status, onChange: (e) => changeCondition(setStatus, e.target.value) },
             h('option', { value: '' }, '全部状态'),
             ['OPEN', 'UPCOMING', 'UNVERIFIED', 'STALE', 'CLOSED', 'UNKNOWN'].map((s) => h('option', { key: s, value: s }, radarStatusLabels[s]))),
-          h('input', { 'aria-label': '城市（当前加载页）', style: { ...S.input, width: 130 }, value: city, onChange: (e) => setCity(e.target.value), placeholder: '城市（当前页）' }),
-          h('select', { 'aria-label': '招聘类型（当前加载页）', style: { ...S.input, width: 140 }, value: recruit, onChange: (e) => setRecruit(e.target.value) },
+          h('input', { 'aria-label': '城市（全库，可逗号分隔）', style: { ...S.input, width: 160 }, value: city, onChange: (e) => changeCondition(setCity, e.target.value), placeholder: '城市：北京,上海' }),
+          h('select', { 'aria-label': '招聘类型（全库）', style: { ...S.input, width: 140 }, value: recruit, onChange: (e) => changeCondition(setRecruit, e.target.value) },
             h('option', { value: '' }, '全部招聘类型'),
             Object.entries(radarRecruitLabels).map(([key, label]) => h('option', { key, value: key }, label))),
-          h('label', { style: { ...S.row, ...S.muted } }, h('input', { type: 'checkbox', checked: completeOnly, onChange: (e) => setCompleteOnly(e.target.checked) }), '只看完整 JD'),
-          h('input', { 'aria-label': '最低匹配分', style: { ...S.input, width: 100 }, value: minScore, onChange: (e) => setMinScore(e.target.value), placeholder: '最低分' }),
+          h('label', { style: { ...S.row, ...S.muted } }, h('input', { type: 'checkbox', checked: completeOnly, onChange: (e) => changeCondition(setCompleteOnly, e.target.checked) }), '只看完整 JD'),
+          h('input', { 'aria-label': '最低匹配分', style: { ...S.input, width: 100 }, value: minScore, onChange: (e) => changeCondition(setMinScore, e.target.value), placeholder: '最低分' }),
+          h('select', { 'aria-label': '用工形式', style: { ...S.input, width: 120 }, value: remoteType, onChange: (e) => changeCondition(setRemoteType, e.target.value) },
+            h('option', { value: '' }, '全部用工形式'), [['onsite', '现场'], ['remote', '远程'], ['hybrid', '混合']].map(([value, label]) => h('option', { key: value, value }, label))),
+          h('input', { 'aria-label': '毕业年份', type: 'number', style: { ...S.input, width: 110 }, value: gradYear, onChange: (e) => changeCondition(setGradYear, e.target.value), placeholder: '毕业年份' }),
+          h('input', { 'aria-label': '每周最多出勤天数', type: 'number', min: 1, max: 7, style: { ...S.input, width: 140 }, value: daysPerWeekMax, onChange: (e) => changeCondition(setDaysPerWeekMax, e.target.value), placeholder: '每周最多天数' }),
           h(Btn, { kind: 'ghost', onClick: load }, '刷新'))),
-      h('div', { style: { ...S.muted, margin: '6px 0' }, role: 'status' }, loading ? '正在更新岗位…' : `当前加载页 ${list?.jobs?.length ?? 0} 条，筛选显示 ${visibleJobs.length} 条；单次最多加载 120 条。城市 / 招聘类型 / JD 完整度仅筛选当前加载页，不是全库筛选。`),
-      h('div', { style: S.muted }, list?.scope ?? '关键词 / 状态 / 最低分由本地岗位库检索；未访问第三方招聘平台。'),
-      listBody),
+      h('div', { style: { ...S.row, flexWrap: 'wrap', margin: '6px 0', justifyContent: 'space-between' } },
+        h('div', { style: S.muted, role: 'status' }, loading ? '正在更新岗位…' : `本地全库符合 ${total} 条 · 本页 ${pageCount} 条 · 当前范围 ${pageCount ? pageOffset + 1 : 0}–${pageOffset + pageCount}；每页 ${limit} 条。`),
+        h('div', { style: S.row },
+          h(Btn, { kind: 'ghost', 'aria-pressed': viewMode === 'table', onClick: () => setViewMode('table') }, '紧凑表格'),
+          h(Btn, { kind: 'ghost', 'aria-pressed': viewMode === 'card', onClick: () => setViewMode('card') }, '卡片'))),
+      h('div', { style: S.muted }, list?.scope ?? '所有条件由本地岗位全库检索后分页；未访问第三方招聘平台，不代表全网。'),
+      listBody,
+      h('nav', { 'aria-label': '岗位分页', style: { ...S.row, justifyContent: 'flex-end', marginTop: 10 } },
+        h(Btn, { kind: 'ghost', disabled: loading || offset === 0, onClick: () => setOffset(Math.max(0, offset - limit)) }, '上一页'),
+        h('span', { style: S.muted }, `第 ${Math.floor(offset / limit) + 1} / ${Math.max(1, Math.ceil(total / limit))} 页`),
+        h(Btn, { kind: 'ghost', disabled: loading || offset + limit >= total, onClick: () => setOffset(offset + limit) }, '下一页'))),
 
     h('details', { style: S.card },
       h('summary', { style: { ...S.h3, cursor: 'pointer' } }, '添加岗位'),
@@ -883,6 +955,36 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
           h('div', { style: S.muted }, `主要来源：${radarText(detail.sources?.[0]?.source_name ?? detail.sources?.[0]?.source_type)}；${detail.sources?.[0]?.verification_status ?? '核验状态未知'}`),
           h('div', { style: { ...S.muted, whiteSpace: 'pre-wrap' } }, `硬条件（仅展示已记录事实）：学历 / 毕业要求 ${radarText(detail.grade_limit)} · 专业 ${radarText(detail.major_limit)} · 每周出勤 ${detail.days_per_week ? `${detail.days_per_week} 天` : '未知'} · 时长 ${radarText(detail.duration)}`),
 
+          h('details', { style: S.cardTight },
+            h('summary', { style: { ...S.h3, cursor: 'pointer' } }, 'Eligibility / Fit / Evidence · 资格、偏好与证据'),
+            h('div', { style: S.muted }, `画像确认：${radarAssessmentText(assessment?.profileConfirmation)}；资格、偏好分与证据可靠性分别展示，匹配分不是录用概率。`),
+            h('div', { style: S.grid(240) },
+              h('section', null, h('div', { style: S.h3 }, 'Eligibility · 硬性资格'),
+                h('div', { style: S.muted }, `结论：${radarAssessmentText(assessment?.eligibility?.status)}`),
+                (assessment?.eligibility?.checks ?? []).map((check, i) => h('div', { key: i, style: { ...S.muted, marginTop: 6 } },
+                  `${radarAssessmentText(check.label)} · ${radarAssessmentText(check.status)} · ${radarAssessmentText(check.explanation)}`,
+                  h('div', null, `岗位依据：${radarAssessmentText(check.jobEvidence)}`),
+                  h('div', null, `画像依据：${radarAssessmentText(check.profileEvidence)}`)))),
+              h('section', null, h('div', { style: S.h3 }, 'Fit · 偏好匹配'),
+                h('div', { style: S.muted }, `匹配分：${radarAssessmentText(assessment?.fit?.score)} · 可靠：${radarAssessmentText(assessment?.fit?.reliable)}`),
+                h('div', { style: S.muted }, radarAssessmentText(assessment?.fit?.scoreMeaning)),
+                h('div', { style: S.muted }, `维度：${radarAssessmentText(assessment?.fit?.breakdown)}`),
+                h('div', { style: S.muted }, `理由：${radarAssessmentText(assessment?.fit?.reasons)}`),
+                h('div', { style: S.muted }, `不确定性：${radarAssessmentText(assessment?.fit?.uncertainty)}`)),
+              h('section', null, h('div', { style: S.h3 }, 'Evidence · 证据可靠性'),
+                h('div', { style: S.muted }, `JD 完整：${radarAssessmentText(assessment?.evidence?.textComplete)}`),
+                h('div', { style: S.muted }, `官方来源：${radarAssessmentText(assessment?.evidence?.officialSource)}`),
+                h('div', { style: S.muted }, `状态评估：${radarAssessmentText(assessment?.evidence?.statusAssessment)}`),
+                h('div', { style: S.muted }, `最近观测：${radarAssessmentText(assessment?.evidence?.latestObservation)}`))),
+            h('div', { style: { ...S.muted, marginTop: 8 } }, `未知信息：${radarAssessmentText(assessment?.unknowns)}`),
+            h('div', { style: S.h3 }, '任务分析（保留来源标签，不代表官方结论）'),
+            (assessment?.taskAnalysis?.tasks ?? []).map((task, i) => h('div', { key: i, style: S.muted }, `${radarAssessmentText(task.text)} · ${radarAssessmentText(task.label)} · 来源字段 ${radarAssessmentText(task.sourceField)}`)),
+            h('div', { style: S.muted }, `任务分析未知项：${radarAssessmentText(assessment?.taskAnalysis?.unknowns)}`),
+            h('div', { style: S.muted }, `理由：${radarAssessmentText(assessment?.decision?.reasons)}`),
+            h('div', { style: S.muted }, `风险：${radarAssessmentText(assessment?.decision?.risks)}`),
+            h('div', { style: S.muted }, `决策未知项：${radarAssessmentText(assessment?.decision?.unknowns)}`),
+            h('div', { style: S.muted }, `下一步：${radarAssessmentText(assessment?.decision?.nextActions)}`)),
+
           // ④ JD 正文（没有就诚实说明，并指路）
           detail.description || detail.requirements
             ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
@@ -966,10 +1068,13 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
           // ⑥ 状态标记
           h('div', { style: { ...S.cardTight, marginTop: 10 } },
             h('div', { style: S.h3 }, '标记招聘状态'),
+            error ? h('div', { role: 'alert', style: { ...S.muted, color: T.error } }, error) : null,
+            h(Field, { label: '官方来源链接（HTTPS）' }, h('input', { 'aria-label': '核验官方来源链接', style: S.input, value: verifySourceUrl, placeholder: 'https://公司官方招聘页', onChange: (e) => setVerifySourceUrl(e.target.value) })),
+            h(Field, { label: '原文证据摘录' }, h('textarea', { 'aria-label': '核验证据摘录', style: S.textarea, value: verifyEvidence, placeholder: '粘贴支持该状态的官方原文摘录', onChange: (e) => setVerifyEvidence(e.target.value) })),
             h('div', { style: { ...S.row, flexWrap: 'wrap' } },
               [['OPEN', true], ['CLOSED', true], ['UPCOMING', true], ['UNVERIFIED', false], ['STALE', false]].map(([s, off]) =>
                 h(Btn, { key: s, kind: 'ghost', onClick: () => verify(s, off) }, `${radarStatusLabels[s]}${off ? '（官方）' : ''}`))),
-            h('div', { style: { ...S.muted, marginTop: 6 } }, '只有官方证据能把状态改成 OPEN/CLOSED；非官方来源最多把 UNKNOWN 升为 UNVERIFIED。')))))
+            h('div', { style: { ...S.muted, marginTop: 6 } }, '只有 HTTPS 官方来源链接及证据摘录通过核验后，才可改为 OPEN/CLOSED/UPCOMING；非官方来源最多把 UNKNOWN 升为 UNVERIFIED。')))))
       : null)
 }
 

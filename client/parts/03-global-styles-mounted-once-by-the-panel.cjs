@@ -19,5 +19,15 @@ function GlobalStyles() {
 .careeros-root ::-webkit-scrollbar { width: 9px; height: 9px }
 .careeros-root ::-webkit-scrollbar-thumb { background: ${T.border2}; border-radius: 8px }
 .careeros-nav button { text-align: left; width: 100% }
+.careeros-root button:focus-visible, .careeros-root [role=button]:focus-visible { outline:2px solid ${T.accent}; outline-offset:2px }
+@media (max-width: 768px) {
+ .careeros-nav { width:132px !important; padding:6px !important }
+ .career-radar-results .career-radar-table { display:none !important }
+ .career-radar-results .career-radar-cards { display:flex !important }
+}
+@media (max-width: 480px) {
+ .careeros-nav { width:96px !important; font-size:12px }
+ .careeros-root main { padding:10px !important }
+}
 `)
 }

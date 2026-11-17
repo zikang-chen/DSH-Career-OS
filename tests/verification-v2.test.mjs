@@ -1,0 +1,5 @@
+import {it}from'node:test'
+import assert from'node:assert/strict'
+import {makeEnv}from'./helpers.mjs'
+it('official flag or page presence without excerpt cannot assert OPEN',()=>{const e=makeEnv();try{const x=e.repos.jobs.upsertJob({company:'测试',title:'岗位',url:'https://careers.example.com/job'},{official:true,source:{sourceType:'official_careers'}});assert.equal(e.repos.jobs.getJob(x.id).status,'UNVERIFIED');const r=e.repos.jobs.applyStatusObservation(x.id,{status:'OPEN',official:true,sourceUrl:'https://careers.example.com/job'});assert.equal(r.changed,false);assert.equal(e.repos.jobs.getJob(x.id).status_verified_at,null)}finally{e.cleanup()}})
+it('explicit sourced status observation can verify and rejects invalid states',()=>{const e=makeEnv();try{const x=e.repos.jobs.upsertJob({company:'测试',title:'岗位'});e.repos.jobs.applyStatusObservation(x.id,{status:'OPEN',official:true,sourceType:'official_careers',sourceUrl:'https://careers.example.com/job',evidence:'正在招聘，接受投递'});assert.equal(e.repos.jobs.getJob(x.id).status,'OPEN');assert.throws(()=>e.repos.jobs.applyStatusObservation(x.id,{status:'nonsense',official:true}),/无效招聘状态/)}finally{e.cleanup()}})
