@@ -1084,11 +1084,11 @@ function KnowledgeAgentRequest({itemId,index}) {
     h('details',null,h('summary',{style:S.muted},'无法连接时复制指令'),h('textarea',{readOnly:true,style:S.textarea,value:prompt})))
 }
 function KnowledgeMedia({ itemId, entry, index, onChanged }) {
-  const [text, setText] = useState(entry.agentTranscript?.text || entry.ocr?.text || '')
+  const [text, setText] = useState((entry.ocrStatus==='reviewed' ? entry.ocr?.text : entry.agentTranscript?.text || entry.ocr?.text) || '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const [showImage, setShowImage] = useState(false)
-  useEffect(() => setText(entry.agentTranscript?.text || entry.ocr?.text || ''), [entry.ocr?.text,entry.agentTranscript?.text])
+  useEffect(() => setText((entry.ocrStatus==='reviewed' ? entry.ocr?.text : entry.agentTranscript?.text || entry.ocr?.text) || ''), [entry.ocr?.text,entry.agentTranscript?.text,entry.ocrStatus])
   const run = async action => {
     setBusy(true); setError(null)
     try { await apiPost('/knowledge/ocr', { id: itemId, index: entry.index || index + 1, action, ...(action === 'review' ? { text } : {}) }); onChanged() }

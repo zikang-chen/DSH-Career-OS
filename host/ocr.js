@@ -93,6 +93,6 @@ export async function processKnowledgeOcr({id,index=1,action='recognize',text},{
    image.ocrStatus=result.text?.trim()?'review':'failed'
    if(image.ocrStatus==='failed')image.error='图片未识别出文字，原图仍保留'
   }catch(e){image.ocrStatus='failed';image.error=e.message}
- }else throw new Error('action必须recognize或review')
- return {ok:image.ocrStatus!=='failed',image,item:repos.knowledge.updateMedia(id,media),note:'OCR独立于作者正文保存，未经核对不当作可靠逐字引文；只在本机识别。'}
+ }else throw new Error('action必须recognize、agent_prepare、agent_save或review')
+ return {ok:image.ocrStatus!=='failed',image,item:repos.knowledge.updateMedia(id,media),note:action==='agent_save'?'Agent校对稿独立保存，不是人工确认；模型读图可能使用云端服务。':'OCR独立于作者正文保存，本地识别未经核对不当作可靠逐字引文。'}
 }
