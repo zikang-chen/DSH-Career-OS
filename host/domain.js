@@ -128,7 +128,7 @@ export function parseRemoteType(text) {
 
 export function parseDaysPerWeek(text) {
   const t = String(text ?? '')
-  const filler = '(?:需|须|要求|出勤|到岗|至少|不少于|保证|每周|可|能|上|工作日|\\s)*'
+  const filler = '(?:需|须|要求|出勤|到岗|至少|不少于|保证|每周|全勤|可|能|上|工作日|\\s)*'
   const patterns = [
     new RegExp(`每周${filler}([0-9一二三四五六七])\\s*[-~到至]\\s*([0-9一二三四五六七])\\s*天`),
     new RegExp(`每周${filler}([0-9一二三四五六七八九十]+)\\s*天`),

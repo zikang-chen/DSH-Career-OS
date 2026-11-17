@@ -18,7 +18,8 @@ import { RESUME_SKILLS, analyzeBullets } from './resume_skills.js'
 import { captureSite, sourceHealthRows } from './site-capture.js'
 import { fetchOfferShowSalaryHighlights } from './offershow.js'
 import {processKnowledgeOcr,ocrStatus} from './ocr.js'
-import {buildJob360} from './job360.js'
+import {buildJob360,assessJobDisplay} from './job360.js'
+import {withJobListEvidence} from './job-list-evidence.js'
 import {ResearchBudget} from './research-budget.js'
 import {buildToday,updateTodayTask} from './today.js'
 import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
@@ -364,7 +365,7 @@ export function registerCareerTools(ctx, deps) {
     handler: (args) => {
       const profile = repos.profile.getWithResume()
       const page = repos.jobs.queryPage({ ...args, limit: args.limit ?? 30 })
-      const rows=page.items
+      const rows=withJobListEvidence(repos,page.items)
       return {
         ok: true,
         count: rows.length,total:page.total,limit:page.limit,offset:page.offset,
@@ -376,7 +377,7 @@ export function registerCareerTools(ctx, deps) {
         jobs: rows.map((j) => ({
           id: j.id, company: j.company_name, title: j.title, location: j.location,
           internshipType: INTERNSHIP_LABEL[j.internship_type] ?? j.internship_type,
-          status: j.status, statusLabel: STATUS_LABEL[j.status] ?? j.status,
+          status: j.status, statusLabel: assessJobDisplay(j,profile).statusDisplay,
           statusVerifiedAt: j.status_verified_at, deadline: j.deadline,
           matchScore: j.match_score, url: j.source_url ?? null, skills: j.skills,
         })),
