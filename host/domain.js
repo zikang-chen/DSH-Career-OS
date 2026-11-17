@@ -275,7 +275,9 @@ export function findJobIdentity(db, job, candidates) {
     const row = db.get('SELECT id, title, company_name FROM job WHERE company_id IS ? AND job_code IS ?', [job.companyId ?? null, job.jobCode])
     if (row) return { id: row.id, reason: 'job_code' }
   }
-  if (job.url) {
+  // 有岗位编号时不按 URL 相认：一次列表抓取里所有岗位共用同一个 pageUrl，
+  // 若拿它当身份，整页岗位会被合并成一条。编号已是更强的身份，跳过这一层。
+  if (job.url && !job.jobCode) {
     const row = db.get('SELECT job_id AS id FROM job_source WHERE source_url = ? LIMIT 1', [job.url])
     if (row) return { id: row.id, reason: 'source_url' }
   }

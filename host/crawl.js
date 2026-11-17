@@ -24,9 +24,11 @@ const TITLE_KEYS = ['title', 'name', 'jobName', 'job_name', 'positionName', 'pos
 // 国内校招接口普遍用蛇形/带后缀的字段名（city_name / work_city / location_name），
 // 少写一个就会把一整个接口判成「没有岗位」。
 const LOCATION_KEYS = ['city', 'location', 'workPlace', 'workplace', 'workCity', 'cityName', 'city_name', 'jobCity', 'job_city',
-  'cityList', 'address', 'locationName', 'location_name', 'work_place', 'work_city', 'base', 'region', 'city_text']
-const URL_KEYS = ['url', 'link', 'jobUrl', 'job_url', 'detailUrl', 'detail_url', 'positionUrl', 'position_url', 'href', 'jobHref', 'applyUrl', 'apply_url', 'job_detail_url']
-const CODE_KEYS = ['id', 'jobId', 'job_id', 'positionId', 'position_id', 'code', 'postId', 'post_id', 'jobCode', 'job_code']
+  'cityList', 'address', 'locationName', 'location_name', 'work_place', 'work_city', 'base', 'region', 'city_text',
+  // 对象型地点（字节 city_info，其他家 cityInfo / location_info）
+  'city_info', 'cityInfo', 'city_list', 'location_info', 'locationInfo', 'city_detail', 'cities']
+const URL_KEYS = ['url', 'link', 'jobUrl', 'job_url', 'detailUrl', 'detail_url', 'positionUrl', 'position_url', 'href', 'jobHref', 'applyUrl', 'apply_url', 'job_detail_url', 'position_url_pc']
+const CODE_KEYS = ['id', 'jobId', 'job_id', 'positionId', 'position_id', 'code', 'postId', 'post_id', 'jobCode', 'job_code', 'post_id_str', 'job_post_id']
 const DEPT_KEYS = ['department', 'dept', 'departmentName', 'department_name', 'team', 'bu', 'businessUnit', 'category', 'job_category', 'jobCategory']
 
 const NAV_WORDS = /^(首页|上一页|下一页|末页|更多|登陆|登录|注册|搜索|关于我们|联系我们|返回|详情|查看|立即申请|apply|home|next|prev|more)$/i
@@ -40,11 +42,52 @@ export function looksLikeJobTitle(text) {
   return /实习|工程师|分析师|产品|运营|研究员|开发|设计|顾问|助理|经理|专员|主管|算法|数据|前端|后端|测试|销售|财务|法务|人力|市场|供应链|autumn|intern|engineer|analyst|manager|intern/i.test(t)
 }
 
+/**
+ * 把一个字段值压成可读文本。
+ * 国内校招接口常把地点/类别塞成对象（city_info: {code, name}）或数组，直接 String() 会得到 [object Object]，
+ * 于是「标题 + 地点」的判定就失效、整页岗位被当成没抓到。
+ */
+function asText(value, depth = 0) {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'string') return value.trim() || null
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (depth > 2) return null
+  if (Array.isArray(value)) {
+    const parts = value.map((item) => asText(item, depth + 1)).filter(Boolean)
+    return parts.length ? parts.join(' / ') : null
+  }
+  if (typeof value === 'object') {
+    for (const key of ['name', 'name_cn', 'nameCn', 'zh_name', 'city_name', 'label', 'text', 'title', 'value', 'desc']) {
+      const found = asText(value[key], depth + 1)
+      if (found) return found
+    }
+    return null
+  }
+  return null
+}
+
 function firstOf(obj, keys) {
   for (const key of keys) {
-    const value = obj[key]
-    if (typeof value === 'string' && value.trim()) return value.trim()
-    if (typeof value === 'number') return String(value)
+    const text = asText(obj[key])
+    if (text) return text
+  }
+  return null
+}
+
+/** 已知站点「没有详情链接只有 id」时，按模板拼出可投递的详情页。 */
+function detailUrlFor(baseUrl, code) {
+  if (!baseUrl || !code) return null
+  let parsed
+  try {
+    parsed = new URL(baseUrl)
+  } catch {
+    return null
+  }
+  const host = parsed.hostname
+  if (/(^|\.)jobs\.bytedance\.com$/.test(host)) {
+    // 校招与社招是两个站内应用，按来源路径判断，猜不到时按校招。
+    const section = /\/experienced/.test(parsed.pathname) ? 'experienced' : 'campus'
+    return `https://jobs.bytedance.com/${section}/position/${encodeURIComponent(code)}/detail`
   }
   return null
 }
@@ -143,23 +186,29 @@ export function walkJsonForPostings(parsed, baseUrl) {
     }
     if (typeof node !== 'object') continue
     const title = firstOf(node, TITLE_KEYS)
-    const url = firstOf(node, URL_KEYS)
+    const code = firstOf(node, CODE_KEYS)
+    const rawUrl = firstOf(node, URL_KEYS)
     const location = firstOf(node, LOCATION_KEYS)
-    // Require a title plus at least one corroborating field so generic objects
-    // (nav config, i18n strings) do not become fake postings.
-    if (title && (url || location) && looksLikeJobTitle(title)) {
+    // 只认「像岗位 id」的代码：字典项（recruit_type: {id:"1", name:"暑期实习"}）也带 id+name，
+    // 但那种短枚举值不是岗位，会把字典表误当成岗位列表。
+    const codeLooksReal = Boolean(code && /^[0-9a-zA-Z_-]{8,}$/.test(code))
+    // 有 id 也算数：国内校招接口普遍只给岗位 id、不给详情链接，靠 id 能拼出投递页。
+    if (title && (rawUrl || location || codeLooksReal) && looksLikeJobTitle(title)) {
+      const url = rawUrl ? absolute(rawUrl, baseUrl) : detailUrlFor(baseUrl, code)
       const key = `${title}|${location ?? ''}`
       if (!seen.has(key)) {
         seen.add(key)
         postings.push({
           title: str(title, 200),
-          url: absolute(url, baseUrl),
+          url,
           location: str(location, 200),
           department: str(firstOf(node, DEPT_KEYS), 200),
-          jobCode: str(firstOf(node, CODE_KEYS), 120),
-          description: str(node.description ?? node.jobDescription ?? node.requirement ?? node.jobDescriptionHtml, 20000),
-          publishedAt: str(node.publishTime ?? node.publishDate ?? node.createTime, 40),
-          deadline: parseDeadline(String(node.deadline ?? node.endTime ?? node.validThrough ?? '')),
+          jobCode: str(code, 120),
+          description: str(node.description ?? node.jobDescription ?? node.job_description ?? node.requirement ?? node.requirements, 20000),
+          requirements: str(node.requirement ?? node.requirements, 20000),
+          recruitTypeText: firstOf(node, ['recruit_type', 'recruitType', 'recruitment_type', 'recruitmentType']),
+          publishedAt: str(node.publishTime ?? node.publish_time ?? node.publishDate ?? node.createTime ?? node.create_time, 40),
+          deadline: parseDeadline(String(node.deadline ?? node.endTime ?? node.end_time ?? node.validThrough ?? '')),
           via: 'embedded',
         })
       }
@@ -368,7 +417,7 @@ export async function crawlListing(url, opts = {}) {
 
 /** Normalize one crawled posting into the shape `JobRepo.upsertJob` accepts. */
 export function postingToJob(posting, { company, pageUrl, pageText } = {}) {
-  const haystack = [posting.title, posting.description, posting.department, pageText].filter(Boolean).join('\n')
+  const haystack = [posting.title, posting.description, posting.department, posting.recruitTypeText, pageText].filter(Boolean).join('\n')
   return {
     company: posting.company ?? company,
     title: posting.title,
@@ -378,7 +427,7 @@ export function postingToJob(posting, { company, pageUrl, pageText } = {}) {
     url: posting.url ?? pageUrl,
     applyUrl: posting.url ?? pageUrl,
     description: posting.description ?? null,
-    requirements: posting.description ?? null,
+    requirements: posting.requirements ?? posting.description ?? null,
     internshipType: parseInternshipType(haystack),
     recruitType: parseRecruitType(haystack),
     remoteType: parseRemoteType(haystack),

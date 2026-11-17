@@ -105,6 +105,37 @@ D:\career_os\            ← 这个包本身就是 bundle
 > 实测：`career_browser_capture` 打开 Lever 演示接口 → 自动捕获 JSON → **10 条岗位**，
 > 并列出它考虑过的全部候选响应（含得分与理由），抓错了能直接看出问题在哪。
 
+### 按公司来：地址 → 登录 → 抓 → 7 天 diff
+
+完整流程就三步，每家公司只需登录一次：
+
+```
+career_campus_portal  {company:"腾讯"}   → 现场探测，返回能打开的校招地址
+career_browser_login  {url:"https://join.qq.com"}  → 你登录
+career_browser_capture {url:"…", company:"腾讯"}   → 抓取入库
+```
+
+**地址不靠记忆**：内置 15 家公司的候选地址，每次现场探测（HTTP 状态 + 页面标题是否像招聘页），
+只把真的能打开的那个给你。清单外公司会明确说「我不知道」，并让你给一次确认过的地址。
+
+**岗位列表会变，所以每次抓取都留痕**（`company_capture` 表）：
+
+| 记录 | 用途 |
+| --- | --- |
+| 抓取时间 + 筛选范围指纹 | **7 天过期**判断：`captureFreshness` 返回 ageDays / stale / dueAt |
+| 这次抓到多少、新增几条 | 两次抓取之间的 **added / removed / unchanged** |
+
+**一个关键的设计约束**：只有**筛选范围相同**的两次抓取才能判定「下架」。
+上次看「产品」这次看全部，消失的岗位不能算关闭——`diffCaptures` 会返回
+`scopesComparable: false` 并把它们放进 `vanishedButNotClosed`，不会误报。
+
+**JD 正文也一起落库**（`jd_snapshot` 表，每次抓取存一份）：标题/地点/截止/描述/要求都做内容哈希，
+所以能发现「同一个岗位要求从本科改成了硕士」——这对改简历是硬信号。
+
+> 实测（字节跳动校招，真实数据）：第一次抓 → 10 条新建 + 10 条 JD 快照；
+> 立刻再抓一次 → `created:0 / merged:10 / added:0 / removed:0 / unchanged:10`，
+> 过期时间算到 `2026-11-24`。JD 正文实测入库（如「Agent开发实习生」描述 428 字、要求 169 字）。
+
 ## 投递管理：要证据链，不要状态标签
 
 投递记录不只是「投了哪家」，而是**可复盘的凭据**：
@@ -152,6 +183,6 @@ node scripts\setup-runtime.mjs       # 装 PDF 解析依赖到项目内 runtime/
 
 ## 现状
 
-schema **v9** / ftsMode `trigram` / **71 工具** / 11 个测试套件 158 个用例全绿 / 面板已进入 Web boot graph。
+schema **v10** / ftsMode `trigram` / **73 工具** / 12 个测试套件 175 个用例全绿 / 面板已进入 Web boot graph。
 `data/` 与 `runtime/` 不入库（含真实简历与联系方式）；新机器克隆后跑一次 `scripts/setup-runtime.mjs` 即可。
 详见 [docs/acceptance-report.md](docs/acceptance-report.md) 与 [docs/environment.md](docs/environment.md)。

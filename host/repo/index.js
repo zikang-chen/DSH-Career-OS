@@ -5,6 +5,7 @@ import { JobRepo } from './jobs.js'
 import { ApplicationRepo } from './applications.js'
 import { IntelRepo } from './intel.js'
 import { MonitorRepo } from './monitor.js'
+import { CaptureRepo } from './captures.js'
 
 export class Repos {
   constructor(db, logger) {
@@ -15,7 +16,8 @@ export class Repos {
     this.applications = new ApplicationRepo(db, logger)
     this.intel = new IntelRepo(db, logger, this.jobs)
     this.monitor = new MonitorRepo(db, logger)
+    this.captures = new CaptureRepo(db, logger)
   }
 }
 
-export { ProfileRepo, JobRepo, ApplicationRepo, IntelRepo, MonitorRepo }
+export { ProfileRepo, JobRepo, ApplicationRepo, IntelRepo, MonitorRepo, CaptureRepo }

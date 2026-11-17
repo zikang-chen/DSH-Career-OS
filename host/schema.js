@@ -2,7 +2,7 @@
 // and is recorded in `schema_migrations`. Never edit an applied migration — append a
 // new one instead, so existing databases keep their history and user data.
 
-export const SCHEMA_VERSION = 9
+export const SCHEMA_VERSION = 10
 
 /**
  * @type {Array<{version:number,name:string,sql:string}>}
@@ -644,6 +644,47 @@ ALTER TABLE user_profile ADD COLUMN rank_text TEXT;
 ALTER TABLE application ADD COLUMN submitted_jd TEXT;
 ALTER TABLE application ADD COLUMN submission_snapshot TEXT;
 ALTER TABLE application ADD COLUMN jd_url TEXT;
+`,
+  },
+  {
+    version: 10,
+    name: 'capture-state-and-jd-history',
+    // 岗位列表一直在变，所以每次抓取都要留痕：
+    //   company_capture 记住「哪家公司、什么时候、用什么筛选范围、抓到多少」，
+    //   用于 7 天过期判断和两次抓取之间的 diff；
+    //   jd_snapshot 记住每个岗位当时的标题/地点/截止/JD 正文，
+    //   用于发现「同一个岗位要求变严了」——这对改简历是重要信号。
+    sql: `
+CREATE TABLE company_capture (
+  id           TEXT PRIMARY KEY,
+  company_key  TEXT NOT NULL,
+  company_name TEXT,
+  source_url   TEXT,
+  scope        TEXT,
+  scope_key    TEXT,
+  captured_at  TEXT NOT NULL,
+  found        INTEGER NOT NULL DEFAULT 0,
+  created      INTEGER NOT NULL DEFAULT 0,
+  merged       INTEGER NOT NULL DEFAULT 0,
+  stats        TEXT,
+  note         TEXT
+);
+CREATE INDEX idx_capture_company ON company_capture(company_key, captured_at DESC);
+
+CREATE TABLE jd_snapshot (
+  id           TEXT PRIMARY KEY,
+  job_id       TEXT NOT NULL,
+  company_key  TEXT,
+  captured_at  TEXT NOT NULL,
+  title        TEXT,
+  location     TEXT,
+  deadline     TEXT,
+  description  TEXT,
+  requirements TEXT,
+  content_hash TEXT
+);
+CREATE INDEX idx_jd_job ON jd_snapshot(job_id, captured_at DESC);
+CREATE INDEX idx_jd_company ON jd_snapshot(company_key, captured_at DESC);
 `,
   },
 ]

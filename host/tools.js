@@ -7,6 +7,8 @@ import { crawlListing, postingToJob, walkJsonForPostings } from './crawl.js'
 import { ATS_SPECS, detectAts, fetchAtsPostings, normalizeAtsPayload } from './ats.js'
 import { assertReplayable, describeJsonShape, parseCurl, replayRequest } from './curl.js'
 import { browserProfileDir, capturePageJson, closeBrowser, findBrowserExecutable, openForLogin } from './browser.js'
+import { probePortals, resolvePortal } from './portal.js'
+import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
 import { compileTex, detectEngines, renderResumeTex, renderResumeText } from './latex.js'
@@ -17,7 +19,7 @@ import { buildApplyCard, renderApplyCardText } from './applycard.js'
 import { extractResumeText, parseResume, proposalToProfilePatch } from './resume.js'
 import { parsePastedJob, suggestSocialQueries } from './sources.js'
 import { buildBrief, buildPlan, buildTimeline, seasonRuleSet } from './plan.js'
-import { arr, nowIso, parseJson, str, today } from './util.js'
+import { arr, companyKey, nowIso, parseJson, str, today } from './util.js'
 
 const json = (value) => {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
@@ -755,6 +757,7 @@ export function registerCareerTools(ctx, deps) {
       dryRun: B('只预览不写库，默认 false'),
       limit: N('最多导入多少条，默认 200'),
       timeoutMs: N('等待页面加载与请求的毫秒数，默认 25000'),
+      scope: S('这次抓取的筛选范围描述，如「岗位类别=产品;城市=北京,上海;招聘类型=暑期实习」。范围一致的两次抓取才能判定「下架」'),
     },
     required: ['url'],
     handler: async (args) => {
@@ -804,14 +807,68 @@ export function registerCareerTools(ctx, deps) {
         return { ok: true, mode: 'browser', strategy, sourceUrl, found: postings.length, parsed: withCompany.length, preview, candidates: captured.candidates, next: '确认后去掉 dryRun 再跑一次入库。' }
       }
 
+      // ── 抓取留痕：抓之前的现场（用于 diff），抓完再落库 ──
+      const companyName = company ?? withCompany[0]?.company ?? null
+      const ckey = companyKey(companyName ?? '')
+      const scopeKey = scopeKeyOf(args.scope ?? null)
+      const previousCapture = ckey ? repos.captures.latest(ckey, scopeKey) : null
+      const freshness = captureFreshness(previousCapture?.captured_at ?? null)
+      const beforeJobs = ckey ? repos.captures.currentJobs(companyName, ckey) : []
+      const previousJd = ckey ? repos.captures.previousJdSnapshots(ckey) : []
+
       const imported = repos.jobs.importPostings(withCompany, {
-        company,
+        company: companyName,
         pageUrl: sourceUrl,
         official: args.official !== false,
         recruitType: str(args.recruitType, 40) ?? null,
         sourceName: '专用浏览器自动捕获（用户登录态）',
       })
       panel.publish({ kind: 'jobs' })
+
+      // 两次抓取的集合差异：新增 / 下架（范围一致时才算）
+      const batchRows = normalized.map((job, index) => ({
+        jobCode: job.jobCode ?? postings[index]?.jobCode ?? null,
+        title: job.title,
+        location: job.location,
+      }))
+      const setDiff = diffCaptures({
+        previous: beforeJobs.map((row) => ({ ...row, companyKey: ckey })),
+        current: batchRows.map((row) => ({ ...row, companyKey: ckey })),
+        previousScopeKey: previousCapture?.scope_key ?? scopeKey,
+        currentScopeKey: scopeKey,
+      })
+
+      // JD 快照：先取旧值做内容比对，再写新值
+      let jdChanges = []
+      let savedSnapshots = 0
+      if (ckey) {
+        const codeMap = repos.captures.jobIdByCode(companyName, batchRows.map((row) => row.jobCode))
+        const rowsForSnapshot = []
+        normalized.forEach((job, index) => {
+          const code = batchRows[index]?.jobCode
+          const jobId = code ? codeMap.get(String(code)) : null
+          if (!jobId) return
+          rowsForSnapshot.push({
+            jobId, companyKey: ckey, title: job.title, location: job.location,
+            deadline: job.deadline ?? null, description: job.description ?? null, requirements: job.requirements ?? null,
+          })
+        })
+        jdChanges = diffJdSnapshots({ before: previousJd, after: rowsForSnapshot.map((row) => ({ ...row, jobId: row.jobId })) })
+        savedSnapshots = repos.captures.saveJdSnapshots(rowsForSnapshot).saved
+        repos.captures.record({
+          companyKey: ckey,
+          companyName,
+          sourceUrl,
+          scope: str(args.scope, 500) ?? null,
+          scopeKey,
+          found: postings.length,
+          created: imported.created.length,
+          merged: imported.merged.length,
+          stats: { strategy, parsed: withCompany.length, jdSnapshots: savedSnapshots },
+          note: 'career_browser_capture',
+        })
+      }
+
       return {
         ok: true,
         mode: 'browser',
@@ -823,6 +880,25 @@ export function registerCareerTools(ctx, deps) {
         merged: imported.merged.length,
         failed: imported.failed.slice(0, 10),
         sample: preview.slice(0, 10),
+        freshness: {
+          previousCaptureAt: previousCapture?.captured_at ?? null,
+          previousScope: previousCapture?.scope ?? null,
+          ...freshness,
+        },
+        diff: {
+          added: setDiff.added.slice(0, 40),
+          removed: setDiff.removed.slice(0, 40),
+          addedCount: setDiff.added.length,
+          removedCount: setDiff.removed.length,
+          unchanged: setDiff.unchanged,
+          scopesComparable: setDiff.scopesComparable,
+          caveat: setDiff.caveat,
+        },
+        jdChanges: jdChanges.slice(0, 30),
+        jdSnapshotsSaved: savedSnapshots,
+        next: setDiff.added.length || setDiff.removed.length
+          ? `本次变化：新增 ${setDiff.added.length} 条、下架 ${setDiff.removed.length} 条。可以让我针对新增岗位做匹配排序。`
+          : '与上次相比没有变化。',
         note: '来源记为「专用浏览器自动捕获」，状态 UNVERIFIED（不是官网页面直采）；需要时可 career_job_verify 升级。',
       }
     },
@@ -833,6 +909,97 @@ export function registerCareerTools(ctx, deps) {
     description: '关闭专用浏览器。登录态（profile）会保留，下次不用重新登录。',
     params: {},
     handler: async () => ({ ...(await closeBrowser({ dataDir: config.dataDir, logger })), profileDir: browserProfileDir(config.dataDir), note: 'profile 已保留，登录态不会丢。' }),
+  }))
+
+  // ── 公司 → 校招官网 ────────────────────────────────────────────────────────
+  add(makeTool({
+    name: 'career_campus_portal',
+    description: '说一家公司，给出它的校招官网地址：本地内置候选项，现场探测哪个真能打开（不凭记忆断言 URL 可用）。拿到地址后用 career_browser_login 登录、再用 career_browser_capture 抓岗位。',
+    params: {
+      company: S('公司名，如 腾讯 / 字节跳动 / 鹅厂'),
+      probe: B('是否现场探测候选地址，默认 true'),
+    },
+    required: ['company'],
+    handler: async (args) => {
+      const name = String(args.company)
+      const portal = resolvePortal(name)
+      if (!portal) {
+        return {
+          ok: false,
+          company: name,
+          reason: '内置清单里没有这家公司（我不是靠记忆瞎给 URL）',
+          next: [
+            `1) 你自己搜「${name} 校园招聘」进官网，把地址发给我；`,
+            '2) 我用 career_browser_login 打开、你登录；',
+            '3) 我用 career_browser_capture 抓。',
+            `（要我把「${name}」加进内置清单也可以，给我一次确认过的地址即可。）`,
+          ].join('\n'),
+        }
+      }
+      const probe = args.probe === false ? null : await probePortals(portal, { timeoutMs: 12000 })
+      const best = probe?.best ?? portal.urls?.[0] ?? null
+      return {
+        ok: Boolean(best),
+        company: portal.name,
+        matchedBy: name,
+        campusUrl: best,
+        candidates: probe?.results ?? portal.urls.map((url) => ({ url, ok: null, note: '未探测' })),
+        reachable: probe?.reachable ?? null,
+        apiHint: portal.apiHint ?? null,
+        verifiedBy: portal.verifiedBy ?? null,
+        next: best
+          ? `下一步：career_browser_login {url:"${best}"} → 你在窗口里登录 → career_browser_capture {url:"${best}", company:"${portal.name}"}`
+          : '候选地址都打不开：可能改版或被网络限制。把你在浏览器里能打开的校招地址发我，我直接用它。',
+        caveat: '校招站点会改版改地址；这里给的是候选 + 现场探测结果，不是永久承诺。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_capture_status',
+    description: `${STALE_DAYS} 天过期规则的状态视图：某家公司上次什么时候抓的、抓了多少、用的什么筛选范围，是否该重抓；并列出历次抓取记录。`,
+    params: {
+      company: S('公司名（可选，不传则列出全部公司）'),
+      limit: N('历史记录条数，默认 10'),
+    },
+    handler: (args) => {
+      const limit = Math.min(Number(args.limit ?? 10), 50)
+      if (args.company) {
+        const name = String(args.company)
+        const key = companyKey(name)
+        const latest = repos.captures.latest(key)
+        const freshness = captureFreshness(latest?.captured_at ?? null)
+        return {
+          ok: true,
+          company: name,
+          companyKey: key,
+          lastCapturedAt: latest?.captured_at ?? null,
+          lastScope: latest?.scope ?? null,
+          lastFound: latest?.found ?? 0,
+          freshness,
+          stale: freshness.stale,
+          history: repos.captures.history(key, limit),
+          inLibrary: repos.captures.currentJobs(name, key).length,
+          next: freshness.stale
+            ? `数据已过期（${freshness.reason}）：重新抓一次会做 diff，报告新增/下架/JD 改动。`
+            : `数据还新鲜（${freshness.reason}），${freshness.dueAt?.slice(0, 10)} 之后再来。`,
+        }
+      }
+      const rows = repos.db.all(
+        `SELECT company_key, company_name, max(captured_at) AS captured_at, count(*) AS runs, max(found) AS max_found
+         FROM company_capture GROUP BY company_key ORDER BY captured_at DESC LIMIT ?`, [limit])
+      return {
+        ok: true,
+        thresholdDays: STALE_DAYS,
+        companies: rows.map((row) => ({
+          company: row.company_name ?? row.company_key,
+          capturedAt: row.captured_at,
+          runs: row.runs,
+          ...captureFreshness(row.captured_at),
+        })),
+        note: rows.length ? undefined : '还没有任何抓取记录。',
+      }
+    },
   }))
 
   add(makeTool({
