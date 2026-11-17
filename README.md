@@ -84,6 +84,27 @@ D:\career_os\            ← 这个包本身就是 bundle
 > 实测：把 `curl 'https://api.lever.co/v0/postings/leverdemo?mode=json'` 粘进去 → 自动识别为 `ats:lever` → **10 条岗位**（标题/地点/投递地址）。
 > 如果粘错了接口（抓到配置/字典），它会回显这个响应的**字段结构**，让你一眼看出该换哪个请求。
 
+### 更进一步：登录一次，之后自动抓
+
+手动复制 cURL 还是麻烦。`career_browser_login` + `career_browser_capture` 把这一步也省掉：
+
+1. `career_browser_login` 打开一个**专用浏览器窗口**（Edge/Chrome，独立 profile 存在 `data/browser-profile`）；
+2. 你在那个窗口里正常登录目标站点——登录态持久化，**以后都不用再登**；
+3. 之后 `career_browser_capture` 打开岗位页，用 CDP 监听页面自己发出的网络响应，把 JSON 抓回来解析入库。
+
+不需要 F12、不需要复制任何东西。
+
+**为什么不能用 DSH 内置浏览器**：内置浏览器是沙箱化 Electron `<webview>`，它的
+`DesktopBrowserBridge` 只开放 `acquire` / `release` / `onOpenRequested`（源码注释明确写着
+"no Electron objects or arbitrary IPC cross this interface"）。插件读不到那页面的 DOM 或请求，
+所以只能用独立浏览器进程。
+
+**边界**：调试端口只在 `127.0.0.1` 上；只读页面自己的请求，不构造/伪造请求、不破解签名、不绕登录；
+一次一个页面串行；profile 独立，不碰你日常浏览器的数据。
+
+> 实测：`career_browser_capture` 打开 Lever 演示接口 → 自动捕获 JSON → **10 条岗位**，
+> 并列出它考虑过的全部候选响应（含得分与理由），抓错了能直接看出问题在哪。
+
 ## 投递管理：要证据链，不要状态标签
 
 投递记录不只是「投了哪家」，而是**可复盘的凭据**：
@@ -131,6 +152,6 @@ node scripts\setup-runtime.mjs       # 装 PDF 解析依赖到项目内 runtime/
 
 ## 现状
 
-schema **v9** / ftsMode `trigram` / **68 工具** / 10 个测试套件 149 个用例全绿 / 面板已进入 Web boot graph。
+schema **v9** / ftsMode `trigram` / **71 工具** / 11 个测试套件 158 个用例全绿 / 面板已进入 Web boot graph。
 `data/` 与 `runtime/` 不入库（含真实简历与联系方式）；新机器克隆后跑一次 `scripts/setup-runtime.mjs` 即可。
 详见 [docs/acceptance-report.md](docs/acceptance-report.md) 与 [docs/environment.md](docs/environment.md)。

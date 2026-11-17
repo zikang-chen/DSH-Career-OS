@@ -6,6 +6,7 @@ import { APPLICATION_LABEL, APPLICATION_STATUSES, INTERNSHIP_LABEL, JOB_STATUSES
 import { crawlListing, postingToJob, walkJsonForPostings } from './crawl.js'
 import { ATS_SPECS, detectAts, fetchAtsPostings, normalizeAtsPayload } from './ats.js'
 import { assertReplayable, describeJsonShape, parseCurl, replayRequest } from './curl.js'
+import { browserProfileDir, capturePageJson, closeBrowser, findBrowserExecutable, openForLogin } from './browser.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
 import { compileTex, detectEngines, renderResumeTex, renderResumeText } from './latex.js'
@@ -556,6 +557,33 @@ export function registerCareerTools(ctx, deps) {
     },
   }))
 
+  // 响应体 → 岗位列表。curl 重放与浏览器抓取共用这套识别。
+  const extractPostingsFromPayload = (payload, sourceUrl) => {
+    const atsInfo = detectAts(sourceUrl ?? '')
+    let postings = []
+    let strategy = 'generic'
+    if (atsInfo?.ats) {
+      postings = normalizeAtsPayload(atsInfo.ats, payload) ?? []
+      if (postings.length) strategy = `ats:${atsInfo.ats}`
+    }
+    if (!postings.length && payload) {
+      for (const candidate of Object.keys(ATS_SPECS)) {
+        if (candidate === atsInfo?.ats) continue
+        const attempt = normalizeAtsPayload(candidate, payload) ?? []
+        if (attempt.length) {
+          postings = attempt
+          strategy = `ats-guess:${candidate}`
+          break
+        }
+      }
+    }
+    if (!postings.length) {
+      postings = walkJsonForPostings(payload, sourceUrl ?? '')
+      strategy = postings.length ? 'json-walk' : 'none'
+    }
+    return { postings, strategy }
+  }
+
   add(makeTool({
     name: 'career_jobs_from_curl',
     description: '从你自己浏览器里的请求取岗位：把 DevTools「Copy as cURL」粘进来（或直接粘接口返回的 JSON），系统重放一次并解析成岗位入库。这是绕过 SPA 私有接口最可靠的办法——不破解签名、不绕过登录，只重放你被授权的那一次请求。响应里没有岗位时会告诉你 JSON 结构，方便换一个请求再试。',
@@ -646,29 +674,7 @@ export function registerCareerTools(ctx, deps) {
       }
 
       // 先按已知 ATS 结构归一，再退回通用「岗位数组」识别。
-      const atsInfo = detectAts(sourceUrl ?? '')
-      let postings = []
-      let strategy = 'generic'
-      if (atsInfo?.ats) {
-        postings = normalizeAtsPayload(atsInfo.ats, payload) ?? []
-        if (postings.length) strategy = `ats:${atsInfo.ats}`
-      }
-      // URL 认不出是哪家 ATS 时（用户粘的是响应体、或地址被改写），逐个归一器试一遍。
-      if (!postings.length && payload) {
-        for (const candidate of Object.keys(ATS_SPECS)) {
-          if (candidate === atsInfo?.ats) continue
-          const attempt = normalizeAtsPayload(candidate, payload) ?? []
-          if (attempt.length) {
-            postings = attempt
-            strategy = `ats-guess:${candidate}`
-            break
-          }
-        }
-      }
-      if (!postings.length) {
-        postings = walkJsonForPostings(payload, sourceUrl ?? '')
-        strategy = postings.length ? 'json-walk' : 'none'
-      }
+      const { postings, strategy } = extractPostingsFromPayload(payload, sourceUrl)
 
       if (!postings.length) {
         return {
@@ -715,6 +721,118 @@ export function registerCareerTools(ctx, deps) {
         note: '这批岗位的来源记为用户重放的接口响应，状态为 UNVERIFIED（不是官网页面直采），需要时可再用 career_job_verify 升级。',
       }
     },
+  }))
+
+  // ── 专用浏览器：登录一次，之后自动抓 ──────────────────────────────────────
+  add(makeTool({
+    name: 'career_browser_login',
+    description: '打开「专用浏览器」让你登录目标站点（字节/腾讯/学校就业网等）。这个窗口有独立 profile（存在 data/browser-profile），登录一次以后一直有效。注意：不能用 DSH 内置浏览器——那是沙箱 webview，插件读不到页面。',
+    params: {
+      url: S('要打开并登录的网址，如 https://jobs.bytedance.com/campus'),
+    },
+    required: ['url'],
+    handler: async (args) => {
+      const result = await openForLogin({ dataDir: config.dataDir, url: String(args.url), logger })
+      return {
+        ...result,
+        executable: findBrowserExecutable(),
+        next: result.ok
+          ? '请在弹出的浏览器窗口里完成登录，然后回来告诉我，我用 career_browser_capture 抓岗位。'
+          : '没有可用浏览器：请安装 Microsoft Edge 或 Google Chrome。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_browser_capture',
+    description: '用专用浏览器打开一个岗位页，自动捕获它自己发出的 JSON 响应并解析成岗位入库。前提是该站点已通过 career_browser_login 登录过。不需要 F12、不需要复制 cURL。',
+    params: {
+      url: S('岗位列表页地址（必填）'),
+      patterns: SA('判断「哪个响应像岗位列表」的关键词，默认 job/post/position/search/campus/recruit'),
+      company: S('公司名（缺省从页面推断）'),
+      recruitType: S('autumn_campus|spring_campus|summer|daily|other'),
+      official: B('是否官方来源，默认 true'),
+      dryRun: B('只预览不写库，默认 false'),
+      limit: N('最多导入多少条，默认 200'),
+      timeoutMs: N('等待页面加载与请求的毫秒数，默认 25000'),
+    },
+    required: ['url'],
+    handler: async (args) => {
+      const captured = await capturePageJson({
+        dataDir: config.dataDir,
+        url: String(args.url),
+        patterns: arr(args.patterns).length ? arr(args.patterns).map(String) : undefined,
+        timeoutMs: Math.min(Number(args.timeoutMs ?? 25000), 60000),
+        logger,
+      })
+      if (!captured.ok) {
+        return {
+          ok: false,
+          error: captured.error,
+          candidates: captured.candidates ?? [],
+          next: /登录|login/i.test(String(captured.error))
+            ? '这个站点需要登录：先跑 career_browser_login 打开并登录一次。'
+            : (captured.candidates ?? []).length
+              ? '页面发出的 JSON 都不像岗位列表。看 candidates 里的地址，用 career_jobs_from_curl 手动指定其中一条。'
+              : '页面没发出任何 JSON 请求：可能列表是服务端渲染，改用 career_jobs_crawl 直接抓 HTML。',
+        }
+      }
+
+      const sourceUrl = captured.captured.url
+      const { postings, strategy } = extractPostingsFromPayload(captured.captured.json, sourceUrl)
+      if (!postings.length) {
+        return {
+          ok: false,
+          stage: 'no-postings',
+          capturedUrl: sourceUrl,
+          responseShape: describeJsonShape(captured.captured.json),
+          candidates: captured.candidates,
+          next: '抓到的响应里没有岗位列表——看 responseShape 判断是不是配置接口，或用 candidates 换一条。',
+        }
+      }
+
+      const limit = Math.min(Number(args.limit ?? 200), 1000)
+      const company = str(args.company, 200) ?? null
+      const normalized = postings.slice(0, limit).map((posting) => postingToJob(posting, { company, pageUrl: sourceUrl }))
+      const withCompany = normalized.filter((job) => job.title)
+      const preview = withCompany.slice(0, 60).map((job) => ({
+        title: job.title, company: job.company, location: job.location,
+        recruitType: job.recruitType, applyUrl: job.applyUrl, deadline: job.deadline,
+      }))
+
+      if (args.dryRun === true) {
+        return { ok: true, mode: 'browser', strategy, sourceUrl, found: postings.length, parsed: withCompany.length, preview, candidates: captured.candidates, next: '确认后去掉 dryRun 再跑一次入库。' }
+      }
+
+      const imported = repos.jobs.importPostings(withCompany, {
+        company,
+        pageUrl: sourceUrl,
+        official: args.official !== false,
+        recruitType: str(args.recruitType, 40) ?? null,
+        sourceName: '专用浏览器自动捕获（用户登录态）',
+      })
+      panel.publish({ kind: 'jobs' })
+      return {
+        ok: true,
+        mode: 'browser',
+        strategy,
+        sourceUrl,
+        found: postings.length,
+        parsed: withCompany.length,
+        created: imported.created.length,
+        merged: imported.merged.length,
+        failed: imported.failed.slice(0, 10),
+        sample: preview.slice(0, 10),
+        note: '来源记为「专用浏览器自动捕获」，状态 UNVERIFIED（不是官网页面直采）；需要时可 career_job_verify 升级。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_browser_close',
+    description: '关闭专用浏览器。登录态（profile）会保留，下次不用重新登录。',
+    params: {},
+    handler: async () => ({ ...(await closeBrowser({ dataDir: config.dataDir, logger })), profileDir: browserProfileDir(config.dataDir), note: 'profile 已保留，登录态不会丢。' }),
   }))
 
   add(makeTool({
