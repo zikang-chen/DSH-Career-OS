@@ -1,6 +1,6 @@
 // ─── Interview prep: sourced experiences stay separate from JD practice ───────
 function InterviewTab({ focusCode } = {}) {
-  const real = useApi('/interview')
+  const real = useApi(focusCode ? `/interview?jobId=${encodeURIComponent(focusCode)}` : '/interview')
   const [form, setForm] = useState({ jd: '', title: '', company: '' })
   const [plan, setPlan] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -10,7 +10,7 @@ function InterviewTab({ focusCode } = {}) {
   const generate = async () => {
     if (!form.jd.trim()) return setError('请先粘贴目标岗位 JD 原文。')
     setBusy(true); setError(null); setPlan(null)
-    try { setPlan(await apiPost('/interview/from-jd', { jd: form.jd, title: form.title || undefined, company: form.company || undefined })) }
+    try { setPlan(await apiPost('/interview/from-jd', { jd: form.jd, jobId:focusCode||undefined, title: form.title || undefined, company: form.company || undefined })) }
     catch (err) { setError(err.message) } finally { setBusy(false) }
   }
   return h('div', { style: S.col },
@@ -31,7 +31,7 @@ function InterviewTab({ focusCode } = {}) {
       !(plan.questions || []).length ? h(Empty, { title: '未命中可用练习方向', hint: 'JD 可能过短或不包含已支持的关键词，请补充完整文本。' }) : h('div', { style: { ...S.col, marginTop: 10 } }, (plan.knowledgePoints || []).map((topic, i) => h('div', { key: i, style: S.cardTight }, h('div', { style: S.h3 }, topic.topic), (topic.points || []).map((point, n) => h('div', { key: n, style: S.muted }, `· ${point}`)))), (plan.questions || []).map((q, i) => h('div', { key: i, style: S.cardTight }, h(Chip, { tone: 'warn' }, 'AI 练习'), h('div', { style: { ...S.body, marginTop: 4 } }, q.question), h('div', { style: S.muted }, q.category))))) : null,
     h('div', { style: S.card },
       h('div', { style: S.h2 }, '真实面经区 · 已导入的来源样本'),
-      h('div', { style: { ...S.muted, marginBottom: 8 } }, '以下是已导入面经，未按上方 JD 自动匹配。单一自述通常为 C 级、样本有限；请结合公司、岗位与时间自行核对。可在「知识库」采集或手工导入原文。'),
+      h('div', { style: { ...S.muted, marginBottom: 8 } }, focusCode ? '以下仅展示明确关联此岗位的结构化面经；没有记录就留空，不拿其他岗位填充。可到知识库检索公司或采集新资料。' : '以下是已导入的结构化面经，尚未选择目标岗位。单一自述通常为 C 级、样本有限；请先从岗位详情进入准备。'),
       real.loading ? h(Loading) : real.error ? h(ErrorBox, { error: real.error, onRetry: real.reload }) : !(real.data?.interviews || []).length ? h(Empty, { title: '还没有真实面经样本', hint: '先在「知识库」导入有来源的面经，再结构化为面试经历；不会用 AI 练习填充这里。' }) : h('div', { style: S.col }, real.data.interviews.map(iv => h('div', { key: iv.id, style: S.cardTight },
         h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap' } }, h('div', { style: S.h3 }, `${iv.role_title ?? '岗位未标注'} · ${iv.stage ?? '阶段未知'} · ${iv.year ?? '年份未知'}`), h(Chip, { tone: iv.evidence_level === 'A' ? 'success' : undefined }, `真实样本 · ${iv.evidence_level || 'U'} 级`)),
         (iv.topics || []).length ? h('div', { style: { ...S.row, flexWrap: 'wrap', marginTop: 6 } }, iv.topics.map((t, i) => h(Chip, { key: i }, t))) : null,

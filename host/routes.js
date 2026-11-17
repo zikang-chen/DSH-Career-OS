@@ -154,6 +154,10 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
         internshipLabel: j.internship_type, status: j.status, statusLabel: STATUS_LABEL[j.status] ?? j.status,
         statusVerifiedAt: j.status_verified_at, deadline: j.deadline, matchScore: j.match_score,
         skills: j.skills, remoteType: j.remote_type, updatedAt: j.updated_at,
+        salaryText:j.salary_text,recruitType:j.recruit_type,description:j.description,requirements:j.requirements,
+        gradeLimit:j.grade_limit,daysPerWeek:j.days_per_week,duration:j.duration,applyUrl:j.apply_url,
+        sources:repos.db.all('SELECT source_type,source_name,source_url,retrieved_at FROM job_source WHERE job_id=? ORDER BY retrieved_at DESC LIMIT 3',[j.id]),
+        application:repos.db.get('SELECT id,status FROM application WHERE job_id=? AND archived=0 ORDER BY created_at DESC LIMIT 1',[j.id])??null,
       })),
     }
   })
@@ -498,6 +502,10 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
   })
 
   route('POST', '/application', async ({ body }) => {
+    if(body.jobId && (!body.status || body.status==='saved')) {
+      const existing=repos.db.get('SELECT id FROM application WHERE job_id=? AND archived=0 ORDER BY created_at DESC LIMIT 1',[String(body.jobId)])
+      if(existing)return {ok:true,duplicate:true,application:repos.applications.get(existing.id)}
+    }
     const application = repos.applications.create(body)
     panel.publish({ kind: 'applications', id: application.id })
     return { ok: true, application }

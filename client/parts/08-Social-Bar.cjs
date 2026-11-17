@@ -1,5 +1,6 @@
 // ─── Knowledge library / source capture / preserved Social & Bar tools ───────
 const KNOWLEDGE_KINDS = { job: '岗位 JD', interview: '面经经验', announcement: '招聘公告', salary: '薪资线索', research: '研究资料' }
+const KNOWLEDGE_COMPLETENESS = {metadata:'仅链接信息',summary:'列表摘要',partial:'正文节选',full:'已取文字正文'}
 const KNOWLEDGE_STATUS = { inbox: '待整理', active: '在用', archived: '已归档' }
 const knowledgeGrid = min => ({ display: 'grid', gridTemplateColumns: `repeat(auto-fit, minmax(min(100%, ${min}px), 1fr))`, gap: 10 })
 const knowledgeHttp = value => typeof value === 'string' && /^https?:\/\//i.test(value) ? value : null
@@ -138,7 +139,7 @@ function SocialTab({ onNavigate } = {}) {
       h('div', { style: { ...S.h3, overflowWrap: 'anywhere' } }, entry.title || '未命名资料'),
       h('div', { style: S.muted }, [entry.company, entry.role, entry.platform, fmtDate(entry.publishedAt)].filter(Boolean).join(' · ')),
       h('div', { style: { ...S.muted, margin: '8px 0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, knowledgeText(entry.summary || entry.body || '暂无摘要，请打开原文核对。').slice(0, 220)),
-      h('div', { style: S.muted }, `文字完整度：${knowledgeText(entry.completeness) || '未评估'} · 图片 ${(entry.media||[]).length} 张 / 待核对 ${(entry.media||[]).filter(m=>m.ocrStatus!=='reviewed').length} 张`),
+      h('div', { style: S.muted }, `文字完整度：${KNOWLEDGE_COMPLETENESS[entry.completeness] || '未评估'} · 图片 ${(entry.media||[]).length} 张 / 待核对 ${(entry.media||[]).filter(m=>m.ocrStatus!=='reviewed').length} 张`),
       h('div', { style: { ...S.row, marginTop: 10 } }, h(Btn, { onClick: () => { setDetailId(entry.id); setUpdateError(null) } }, '打开原文与来源'), h(KnowledgeLink, { url: entry.url }, '原始链接'))))),
     h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap' } }, h(Btn, { disabled: offset === 0 || list.loading, onClick: () => setOffset(Math.max(0, offset - 20)) }, '上一页'), h('span', { style: S.muted }, `第 ${Math.floor(offset / 20) + 1} 页`), h(Btn, { disabled: list.loading || offset + 20 >= (list.data?.total || 0), onClick: () => setOffset(offset + 20) }, '下一页')),
     h('div',{style:S.card},h('div',{style:S.h2},'① 收集资料 → ② 确认入库 → ③ 分类与读图校正'),h(KnowledgeCapture,{onImported:refresh})),
@@ -147,7 +148,7 @@ function SocialTab({ onNavigate } = {}) {
       detail.loading ? h(Loading) : detail.error ? h(ErrorBox, { error: detail.error, onRetry: detail.reload }) : item ? h('div', { style: S.col },
         h('div', { style: { ...S.row, flexWrap: 'wrap' } }, h(Chip, null, KNOWLEDGE_KINDS[item.kind] || item.kind), h(Chip, null, KNOWLEDGE_STATUS[item.status] || item.status), h(Chip, { tone: 'warn' }, `证据 ${item.evidenceLevel || 'U'}`)),
         h('div', { style: S.muted }, [item.company, item.role, item.platform].filter(Boolean).join(' · ')),
-        h('div', { style: S.muted }, `发布 ${fmtDate(item.publishedAt)} · 获取 ${fmtDate(item.retrievedAt)} · 历史版本 ${Array.isArray(item.revisions) ? item.revisions.length : Number(item.revisions) || 0} · 完整度 ${knowledgeText(item.completeness) || '未评估'}`),
+        h('div', { style: S.muted }, `发布 ${fmtDate(item.publishedAt)} · 获取 ${fmtDate(item.retrievedAt)} · 历史版本 ${Array.isArray(item.revisions) ? item.revisions.length : Number(item.revisions) || 0} · 完整度 ${KNOWLEDGE_COMPLETENESS[item.completeness] || '未评估'}`),
         h(KnowledgeLink, { url: item.url }, '打开原始来源（HTTP/HTTPS）'),
         item.sourceEntityType === 'job' && item.sourceEntityId ? h('div', {style:S.row}, h(Btn,{onClick:()=>onNavigate?.('radar',item.sourceEntityId)},'查看关联岗位'), h(Btn,{onClick:()=>onNavigate?.('studio',item.sourceEntityId)},'准备此岗位简历')) : null,
         h('div', { style: S.h3 }, '原文'), h('div', { style: { ...S.cardTight, ...S.body, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, item.body || '暂无可用正文；不能用标题替代原文。'),

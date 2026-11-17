@@ -4,7 +4,7 @@ const TABS = [
   { key: 'plan', label: '秋招计划', icon: '◷' },
   { key: 'resume', label: '简历与画像', icon: '◧' },
   { key: 'studio', label: '简历工作室', icon: '◨' },
-  { key: 'radar', label: '岗位雷达', icon: '◈' },
+  { key: 'radar', label: '岗位列表', icon: '◈' },
   { key: 'tracker', label: '投递管理', icon: '☰' },
   { key: 'company', label: '公司情报', icon: '◉' },
   { key: 'industry', label: '行业研究', icon: '◎' },
@@ -19,8 +19,8 @@ const TABS = [
  */
 const WORKSPACES = [
   { key: 'home', label: '总览', hint: '今天做什么', tabs: ['overview', 'plan'] },
-  { key: 'opportunities', label: '机会与情报', hint: '发现、核实与比较', tabs: ['radar', 'company', 'industry', 'social'] },
-  { key: 'applications', label: '投递与面试', hint: '推进、准备与复盘', tabs: ['tracker', 'interview'] },
-  { key: 'resume', label: '简历', hint: '素材与出稿', tabs: ['resume', 'studio'] },
+  { key: 'opportunities', label: '找岗位', hint: '浏览岗位与公司背景', tabs: ['radar', 'company', 'industry'] },
+  { key: 'applications', label: '我的投递', hint: '跟进岗位、准备面试', tabs: ['tracker', 'interview'] },
+  { key: 'resume', label: '我的材料', hint: '真实经历、简历与参考资料', tabs: ['studio', 'resume', 'social'] },
   { key: 'settings', label: '设置', hint: '数据源与系统', tabs: ['settings'] },
 ]

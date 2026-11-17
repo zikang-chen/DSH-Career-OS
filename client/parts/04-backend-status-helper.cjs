@@ -71,7 +71,7 @@ function OverviewTab({ bootstrap, onNavigate, onRefresh }) {
       h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 8 } },
         h(Btn, { kind: 'primary', onClick: () => onNavigate('radar') }, '找岗位'),
         h(Btn, { onClick: () => onNavigate('tracker') }, '看投递'),
-        h(Btn, { onClick: () => onNavigate('resume') }, '改简历'),
+        h(Btn, { onClick: () => onNavigate('studio') }, '准备简历'),
         h(Btn, { onClick: () => onNavigate('plan') }, '看计划'),
         h(Btn, { kind: 'ghost', onClick: () => onNavigate('settings') }, '数据源与监控'))),
 

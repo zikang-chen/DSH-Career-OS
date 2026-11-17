@@ -1,5 +1,5 @@
 // ─── Application tracker ─────────────────────────────────────────────────────
-function TrackerTab({ bootstrap, onChanged }) {
+function TrackerTab({ bootstrap, onChanged, onNavigate, focusCode }) {
   const [view, setView] = useState('list')
   const [data, setData] = useState(null)
   const [error, setError] = useState(null)
@@ -41,6 +41,8 @@ function TrackerTab({ bootstrap, onChanged }) {
       .catch((err) => setError(err.message))
       .finally(() => setAppLoading(false))
   }, [])
+
+  useEffect(()=>{if(!focusCode)return;let active=true;apiGet(`/job?id=${encodeURIComponent(focusCode)}`).then(res=>{if(active&&res.job?.application?.id)openApp(res.job.application.id)}).catch(e=>setError(e.message));return()=>{active=false}},[focusCode,openApp])
 
   // 校招/实习阶段顺序：用于「推进到下一阶段」这一个按钮。
   const PIPE = ['saved', 'researching', 'resume_todo', 'ready', 'applied', 'assessment', 'written_test', 'interview_1', 'interview_2', 'final', 'hr', 'offer']
@@ -185,8 +187,7 @@ function TrackerTab({ bootstrap, onChanged }) {
 
   return h('div', { style: S.col },
     error ? h('div', { style: { ...S.card, ...S.muted, color: T.error } }, error) : null,
-    funnelBlock,
-    cardBlock,
+    h('details',{style:S.cardTight},h('summary',{style:{...S.h3,cursor:'pointer'}},'复盘分析与网申信息卡'),funnelBlock,cardBlock),
     h('div', { style: { ...S.row, justifyContent: 'space-between' } },
       h('div', { style: S.h1 }, '投递管理'),
       h('div', { style: S.row },
@@ -256,6 +257,7 @@ function TrackerTab({ bootstrap, onChanged }) {
         onClose: () => { setAppOpen(false); setAppDetail(null) },
       },
         appLoading ? h(Loading) : !appDetail ? h(Empty, { title: '没有取到记录' }) : h('div', { style: S.col },
+          h('div',{style:{...S.cardTight,borderColor:T.accent}},h('div',{style:S.h3},'围绕这次投递继续准备'),h('div',{style:{...S.row,flexWrap:'wrap',marginTop:8}},appDetail.job_id?h(Btn,{onClick:()=>onNavigate?.('radar',appDetail.job_id)},'查看关联岗位'):null,appDetail.job_id?h(Btn,{onClick:()=>onNavigate?.('studio',appDetail.job_id)},'调整草稿简历'):null,appDetail.job_id?h(Btn,{onClick:()=>onNavigate?.('interview',appDetail.job_id)},'准备面试'):null),h('div',{style:{...S.muted,marginTop:6}},appDetail.submissionSnapshot?.frozen?'已提交材料保持冻结；重新修改简历不会更改这次投递历史。':'当前是准备草稿，首次标记已投递时冻结最终材料。')),
 
           h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 } },
             h('div', { style: S.row },

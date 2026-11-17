@@ -135,9 +135,10 @@ export class KnowledgeRepo {
 
   list({ query, kind, company, platform, status: state, limit = 50, offset = 0 } = {}) {
     const where = [], params = []
-    for (const [column, value] of Object.entries({ kind, company, platform: platform?.toLowerCase(), status: state })) {
+    for (const [column, value] of Object.entries({ kind, platform: platform?.toLowerCase(), status: state })) {
       if (value) { where.push(`${column}=?`); params.push(value) }
     }
+    if(company){where.push('company LIKE ?');params.push(`%${String(company).replace(/[%_]/g,'')}%`)}
     if (query) {
       const escaped = String(query).replace(/[\\%_]/g, '\\$&')
       where.push(`(title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\' OR company LIKE ? ESCAPE '\\' OR role LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\' OR notes LIKE ? ESCAPE '\\')`)
