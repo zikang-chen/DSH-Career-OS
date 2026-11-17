@@ -91,9 +91,28 @@ Dashboard「推荐机会」改为调用 `/match/rank` 真实匹配排序；岗�
 
 ### P4-10 自动备份 ✅ 本日已修
 
-`host/backup.js`：插件启动时每天最多备份一次（间隔 20 小时），保留最近 7 份，
-失败不影响主流程。实测生成 `data/backups/career-20261117-074025.db`。
-新增 `tests/backup.test.mjs`（4 用例）。
+`host/backup.js`：启动时每天最多备份一次（间隔 20 小时），保留最近 7 份，失败不影响主流程。
+实测生成 `data/backups/career-20261117-074025.db`；新增 `tests/backup.test.mjs`（4 用例）。
+
+### P4-11 Client 单文件拆分 ✅ 本日已修
+
+`client/index.cjs`（2466 行）按顶层分节拆成 `client/parts/*.cjs`（16 个模块）。
+`scripts/split-client.mjs` 负责切分并**断言拼回字节完全一致**；`build-client.mjs` 改为按文件名
+拼接 parts → 生成 `client/index.cjs` → 包成 bundle。
+**安全性**：输出与原单文件字节等价，运行行为不变；221 个测试（含 stub-React 渲染测试）全绿。
+
+### P4-12 深色主题 ✅ 本日已修
+
+颜色改为三级链：宿主 token（`--dsw-alias-*`）> 作用域兜底（`--careeros-*`）> 浅色 hex；
+`.careeros-root` 内定义浅色/深色两套 `--careeros-*`，通过 `@media (prefers-color-scheme: dark)` 切换。
+宿主提供 token 时优先用宿主的，没有时也能跟随系统深色。
+
+### P4-13 JD → 面试问题与知识点 ✅ 新增
+
+`host/interview.js` + `career_jd_interview` + `POST /interview/from-jd`：
+从 JD 实际出现的词推导知识点（16 类固定表），生成练习题并**一律标 `ai-practice`**，
+明确声明「不是真实面试题」；给了 jobId 时另附已导入的真实面经（证据 C，来源分离）。
+实测一段 AI 产品 JD → 8 类知识点、19 道练习题，全部 ai-practice。
 
 ### ~~P1-6 FTS 没被使用~~ —— **本条审计有误，特此更正**
 

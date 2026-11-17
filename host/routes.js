@@ -15,10 +15,11 @@ import { KIND_LABEL, planTailor, sectionsFromSelection } from './tailor.js'
 import { DOC_LABEL, proposeDocument } from './documents.js'
 import { buildApplyCard, renderApplyCardText } from './applycard.js'
 import { checkResumeQuality } from './quality.js'
+import { buildInterviewPlan } from './interview.js'
 import { buildBrief, buildPlan } from './plan.js'
 import { parsePastedJob } from './sources.js'
 import { sha1ish } from './util.js'
-import { nowIso } from './util.js'
+import { nowIso, str } from './util.js'
 
 export const API_PREFIX = '/plugins/dsh-career/api'
 
@@ -252,6 +253,21 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
     ok: true,
     interviews: repos.intel.listInterviews({ jobId: query.get('jobId') ?? undefined, companyId: query.get('companyId') ?? undefined }),
   }))
+
+  route('POST', '/interview/from-jd', async ({ body }) => {
+    let jdText = str(body.jd, 20000)
+    let job = null
+    let companyName = str(body.company, 200) ?? null
+    if (!jdText && body.jobId) {
+      job = repos.jobs.getJob(String(body.jobId))
+      if (job) {
+        jdText = [job.description, job.requirements].filter(Boolean).join('\n')
+        companyName = companyName ?? job.company_name
+      }
+    }
+    const real = body.jobId ? repos.intel.listInterviews({ jobId: job?.id, companyId: job?.company_id, limit: 50 }) : []
+    return buildInterviewPlan({ jdText, title: str(body.title, 200) ?? job?.title ?? null, company: companyName, realExperiences: real })
+  })
 
   route('GET', '/monitor/rules', () => ({ ok: true, rules: repos.monitor.listRules() }))
   route('GET', '/monitor/runs', ({ query }) => ({ ok: true, runs: repos.monitor.listRuns(Number(query.get('limit') ?? 30)) }))

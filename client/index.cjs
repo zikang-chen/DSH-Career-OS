@@ -12,21 +12,23 @@ const { useCallback, useEffect, useMemo, useRef, useState } = React
 const API = '/plugins/dsh-career/api'
 
 // ─── theme ───────────────────────────────────────────────────────────────────
-const V = (name, fallback) => `var(${name}, ${fallback})`
+// 颜色优先级：宿主 token（--dsw-alias-*） > 本插件的作用域兜底（--careeros-*） > 浅色 hex。
+// --careeros-* 在 GlobalStyles 里按浅色/深色定义，所以宿主不提供 token 时也能跟随系统深色。
+const V = (name, key, fallback) => `var(${name}, var(--careeros-${key}, ${fallback}))`
 const T = {
-  bg: V('--dsw-alias-bg-base', '#ffffff'),
-  surface: V('--dsw-alias-bg-layer-1', '#f7f8fa'),
-  surface2: V('--dsw-alias-bg-layer-2', '#eef0f3'),
-  overlay: V('--dsw-alias-bg-overlay', '#ffffff'),
-  border: V('--dsw-alias-border-l1', '#e3e5e8'),
-  border2: V('--dsw-alias-border-l2', '#cfd3d8'),
-  text: V('--dsw-alias-label-primary', '#111827'),
-  muted: V('--dsw-alias-label-secondary', '#6b7280'),
-  accent: V('--dsw-alias-brand-primary', '#2563eb'),
-  error: V('--dsw-alias-state-error-primary', '#dc2626'),
-  warn: V('--dsw-alias-state-warn-primary', '#d97706'),
-  success: V('--dsw-alias-state-success-primary', '#059669'),
-  idle: V('--dsw-alias-state-idle-primary', '#9ca3af'),
+  bg: V('--dsw-alias-bg-base', 'bg', '#ffffff'),
+  surface: V('--dsw-alias-bg-layer-1', 'surface', '#f7f8fa'),
+  surface2: V('--dsw-alias-bg-layer-2', 'surface2', '#eef0f3'),
+  overlay: V('--dsw-alias-bg-overlay', 'overlay', '#ffffff'),
+  border: V('--dsw-alias-border-l1', 'border', '#e3e5e8'),
+  border2: V('--dsw-alias-border-l2', 'border2', '#cfd3d8'),
+  text: V('--dsw-alias-label-primary', 'text', '#111827'),
+  muted: V('--dsw-alias-label-secondary', 'muted', '#6b7280'),
+  accent: V('--dsw-alias-brand-primary', 'accent', '#2563eb'),
+  error: V('--dsw-alias-state-error-primary', 'error', '#dc2626'),
+  warn: V('--dsw-alias-state-warn-primary', 'warn', '#d97706'),
+  success: V('--dsw-alias-state-success-primary', 'success', '#059669'),
+  idle: V('--dsw-alias-state-idle-primary', 'idle', '#9ca3af'),
 }
 
 const S = {
@@ -114,7 +116,7 @@ function useApi(path, deps) {
 
 // 构建标记：面板标题里显示，用于确认浏览器加载的是不是最新 bundle。
 // 改了 client 之后手动改这个字符串，方便一眼判断有没有缓存。
-const CLIENT_BUILD = 'v2026-11-17.4'
+const CLIENT_BUILD = 'v2026-11-17.5'
 
 
 function Chip({ tone, children }) {
@@ -237,6 +239,18 @@ function Score({ value }) {
 function GlobalStyles() {
   return h('style', null, `
 @keyframes careeros-spin { to { transform: rotate(360deg) } }
+.careeros-root {
+  --careeros-bg: #ffffff; --careeros-surface: #f7f8fa; --careeros-surface2: #eef0f3; --careeros-overlay: #ffffff;
+  --careeros-border: #e3e5e8; --careeros-border2: #cfd3d8; --careeros-text: #111827; --careeros-muted: #6b7280;
+  --careeros-accent: #2563eb; --careeros-error: #dc2626; --careeros-warn: #d97706; --careeros-success: #059669; --careeros-idle: #9ca3af;
+}
+@media (prefers-color-scheme: dark) {
+  .careeros-root {
+    --careeros-bg: #0f1115; --careeros-surface: #171a21; --careeros-surface2: #1f232c; --careeros-overlay: #1b1f27;
+    --careeros-border: #2a2f3a; --careeros-border2: #3a4050; --careeros-text: #e6e9ef; --careeros-muted: #9aa4b2;
+    --careeros-accent: #6ea8fe; --careeros-error: #f87171; --careeros-warn: #fbbf24; --careeros-success: #34d399; --careeros-idle: #6b7280;
+  }
+}
 .careeros-root * { box-sizing: border-box }
 .careeros-root input:focus, .careeros-root textarea:focus, .careeros-root select:focus { border-color: ${T.accent} }
 .careeros-root ::-webkit-scrollbar { width: 9px; height: 9px }

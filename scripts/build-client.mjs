@@ -1,21 +1,44 @@
-// Wrap client/index.cjs into the DSH "wrapped module" format served at
-// /plugins/<id>/client.js. No bundler: the client is written as plain CommonJS and
+// Wrap the client into the DSH "wrapped module" format served at
+// /plugins/<id>/client.js. No bundler: the client is plain CommonJS and
 // React/react-dom come from the host module table through the factory's `require`.
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+//
+// 源码组织：client/parts/*.cjs，按文件名排序拼接成 client/index.cjs（生成物），
+// 再包成 wrapped-bundle.js。拆分是「按顶层分节切分」，拼回与原单文件字节一致，
+// 所以运行时行为与单文件完全相同，不会白屏。
+// 想改界面就改 client/parts/ 下的文件，然后 `node scripts/build-client.mjs`。
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
+const PARTS = resolve(ROOT, 'client', 'parts')
 const SOURCE = resolve(ROOT, 'client', 'index.cjs')
 const OUT = resolve(ROOT, 'client', 'wrapped-bundle.js')
 const ID = 'dsh-career'
 
-const code = readFileSync(SOURCE, 'utf8')
+// 1) 组装源码：优先用 parts，没有则回退到单文件
+let code
+let sourceNote
+if (existsSync(PARTS)) {
+  const files = readdirSync(PARTS).filter((n) => n.endsWith('.cjs')).sort()
+  if (!files.length) {
+    console.error('[build-client] client/parts 目录为空')
+    process.exit(1)
+  }
+  code = files.map((n) => readFileSync(resolve(PARTS, n), 'utf8')).join('\n')
+  sourceNote = `${files.length} parts`
+  // 生成 client/index.cjs，方便阅读与测试直接引用
+  const prev = existsSync(SOURCE) ? readFileSync(SOURCE, 'utf8') : null
+  if (prev !== code) writeFileSync(SOURCE, code, 'utf8')
+} else {
+  code = readFileSync(SOURCE, 'utf8')
+  sourceNote = 'single file'
+}
 
 // Guard: an `export` in the source would break the factory body.
 if (/^\s*export\s/m.test(code)) {
-  console.error('[build-client] client/index.cjs must use module.exports, not ES exports')
+  console.error('[build-client] client source must use module.exports, not ES exports')
   process.exit(1)
 }
 
@@ -35,4 +58,4 @@ const wrapped = [
 
 mkdirSync(dirname(OUT), { recursive: true })
 writeFileSync(OUT, wrapped, 'utf8')
-console.log(`[build-client] wrote ${OUT} (${wrapped.length} bytes, id=${ID})`)
+console.log(`[build-client] wrote ${OUT} (${wrapped.length} bytes, id=${ID}, src=${sourceNote})`)

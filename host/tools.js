@@ -12,6 +12,7 @@ import { fetchJdDetail, resolveJdProvider } from './jd.js'
 import { checkResumeQuality } from './quality.js'
 import { findJobsForMe, prepResumeForJob, summarizeApplications } from './workflows.js'
 import { envelope } from './envelope.js'
+import { buildInterviewPlan } from './interview.js'
 import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
@@ -2141,6 +2142,38 @@ export function registerCareerTools(ctx, deps) {
     description: '为无法自动抓取的平台（小红书/牛客/知乎/脉脉等）生成搜索关键词与公开搜索链接，供用户自己浏览后粘贴回来。',
     params: { company: S('公司名'), role: S('岗位'), year: N('年份') },
     handler: (args) => ({ ok: true, ...suggestSocialQueries(args) }),
+  }))
+
+  add(makeTool({
+    name: 'career_jd_interview',
+    description: '给一段 JD，分析可能的面试问题与知识点。知识点只从 JD 实际出现的词推导；生成的问题明确标为 AI 练习方向（不是真实面试题）；若给了 jobId，会额外带出已导入的真实面经（证据 C，样本有限）。',
+    params: {
+      jd: S('JD 原文（直接粘贴；与 jobId 二选一）'),
+      jobId: S('岗位 id（可选，会自动取库里已存的 JD 正文）'),
+      title: S('岗位名（可选）'),
+      company: S('公司名（可选）'),
+    },
+    handler: (args) => {
+      let jdText = str(args.jd, 20000)
+      let job = null
+      let companyName = str(args.company, 200) ?? null
+      if (!jdText && args.jobId) {
+        job = repos.jobs.getJob(String(args.jobId))
+        if (job) {
+          jdText = [job.description, job.requirements].filter(Boolean).join('\n')
+          companyName = companyName ?? job.company_name
+        }
+      }
+      const real = args.jobId
+        ? repos.intel.listInterviews({ jobId: job?.id, companyId: job?.company_id, limit: 50 })
+        : []
+      return buildInterviewPlan({
+        jdText,
+        title: str(args.title, 200) ?? job?.title ?? null,
+        company: companyName,
+        realExperiences: real,
+      })
+    },
   }))
 
   add(makeTool({
