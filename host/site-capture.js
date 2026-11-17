@@ -36,15 +36,17 @@ export function isSubstantiveNoteText(value) {
   return body.length>=40
 }
 
-export async function fetchXhsNoteBody(item, {dataDir,captureJson = capturePageJson,captureText = capturePageText} = {}) {
+export async function fetchXhsNoteBody(item, {dataDir,budget,signal,captureJson = capturePageJson,captureText = capturePageText} = {}) {
   if (!item?.id || !item.url) return {ok:false,error:'笔记缺少详情链接'}
   const parse=getSiteProfile('xhs').parse
-  const cap=await captureJson({dataDir,url:item.url,patterns:['/feed'],prefer:'/feed',timeoutMs:10000,
+  const readJson=ctx=>captureJson({dataDir,url:item.url,patterns:['/feed'],prefer:'/feed',timeoutMs:Math.min(10000,ctx?.timeoutMs??10000),deadlineAt:budget?.deadline,signal:signal??budget?.signal,
     validateJson:json=>parse(json).some(n=>n.id===item.id && isSubstantiveNoteText(n.desc)),
   })
+  const cap=budget?await budget.visit('面经详情响应',readJson):await readJson()
   if(cap.ok){const n=parse(cap.captured.json).find(n=>n.id===item.id);if(isSubstantiveNoteText(n?.desc))return {ok:true,desc:n.desc,publishedAt:n.publishedAt??item.publishedAt,media:n.media,source:'note-detail-json'}}
   const selectors=['#detail-desc','.note-content .desc']
-  const page=await captureText({dataDir,url:item.url,selectors,timeoutMs:12000})
+  const readText=ctx=>captureText({dataDir,url:item.url,selectors,timeoutMs:Math.min(12000,ctx?.timeoutMs??12000),deadlineAt:budget?.deadline,signal:signal??budget?.signal})
+  const page=budget?await budget.visit('面经页面正文',readText):await readText()
   const text=(page.sections??[]).filter(s=>selectors.includes(s.selector)).map(s=>s.text).sort((a,b)=>b.length-a.length)[0]
   const images=[...new Map((page.images??[]).filter(i=>i.url).map(i=>[i.url,i])).values()].map((image,i)=>({...image,index:i+1,ocrStatus:'pending'}))
   const media={images,type:item.media?.type??null,textStatus:'not-ocr-processed'}
@@ -57,16 +59,16 @@ export async function captureSite(args = {}, deps = {}) {
   const config=deps.config
   const capture=deps.captureJson??capturePageJson, detail=deps.fetchDetail??fetchJdDetail, note=deps.fetchNoteBody??fetchXhsNoteBody
   const run=()=>captureSiteInternal(args,{...deps,budget,
-    captureJson:opts=>budget.visit('搜索 '+args.site,ctx=>capture({...opts,timeoutMs:Math.min(opts.timeoutMs??20000,ctx.timeoutMs),signal:ctx.signal})),
-    fetchDetail:opts=>budget.visit('岗位JD详情',ctx=>detail({...opts,timeoutMs:Math.min(opts.timeoutMs??14000,ctx.timeoutMs),signal:ctx.signal})),
-    fetchNoteBody:(item,opts)=>budget.visit('面经正文',()=>note(item,opts)),
+    captureJson:opts=>budget.visit('搜索 '+args.site,ctx=>capture({...opts,timeoutMs:Math.min(opts.timeoutMs??20000,ctx.timeoutMs),signal:ctx.signal,deadlineAt:budget.deadline})),
+    fetchDetail:opts=>budget.visit('岗位JD详情',ctx=>detail({...opts,timeoutMs:Math.min(opts.timeoutMs??14000,ctx.timeoutMs),signal:ctx.signal,deadlineAt:budget.deadline})),
+    fetchNoteBody:(item,opts)=>note(item,{...opts,budget,signal:budget.signal}),
   }).then(result=>({...result,budget:budget.summary()}))
   // 只缓存只读预览；确认入库是单独授权，不能被预览缓存吞掉写操作。
   if(args.dryRun!==false && !deps.captureJson){const key=JSON.stringify([config?.dataDir,args.site,args.keyword,args.url,args.city,args.recruitType,args.fillJd,args.fillJdLimit,args.bodyLimit]);return boundedResearch(key,run,{force:args.force===true})}
   return run()
 }
 async function captureSiteInternal(args = {}, {config,repos,panel,logger,budget,captureJson = capturePageJson,fetchDetail = fetchJdDetail,fetchNoteBody = fetchXhsNoteBody} = {}) {
-  if(args.site==='nowcoder') return budget.visit('牛客搜索与正文',ctx=>captureNowcoder({...args,bodyLimit:Math.min(args.bodyLimit??2,2)},{config,repos,panel,signal:ctx.signal}))
+  if(args.site==='nowcoder') return captureNowcoder({...args,bodyLimit:Math.min(args.bodyLimit??2,2)},{config,repos,panel,budget,signal:budget.signal})
   const profile = getSiteProfile(args.site)
   if (!profile) return {ok:false,stage:'validation',error:'未知站点（xhs/boss/51job/offershow）'}
   let wantType,limit,jdLimit,bodyLimit,timeoutMs,plan,targetUrl

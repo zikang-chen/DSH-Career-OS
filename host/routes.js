@@ -21,6 +21,7 @@ import { captureSite, sourceHealthRows } from './site-capture.js'
 import {processKnowledgeOcr,ocrStatus} from './ocr.js'
 import {syncKnowledgeIndex} from './knowledge-sync.js'
 import {assessJob360} from './assessment.js'
+import {buildJob360,assessJobDisplay} from './job360.js'
 import { capturePageJson, openForLogin } from './browser.js'
 import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
@@ -156,6 +157,7 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
       count: rows.length,
       scope: '仅本地已入库岗位；未访问第三方招聘平台',
       jobs: rows.map((j) => ({
+        ...assessJobDisplay(repos.jobs.getJob(j.id),profile),
         id: j.id, company: j.company_name, companyId: j.company_id, title: j.title,
         location: j.location, department: j.department, internshipType: j.internship_type,
         internshipLabel: j.internship_type, status: j.status, statusLabel: STATUS_LABEL[j.status] ?? j.status,
@@ -174,9 +176,9 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
     if (!id) throw new HttpError('缺少 id')
     const job = repos.jobs.getJob(id)
     if (!job) throw new HttpError('岗位不存在', 404)
-    const knowledge=repos.knowledge.list({company:job.company_name,limit:30}).items
-    const assessment=assessJob360({job,profile:repos.profile.getWithResume(),experiences:repos.profile.listExperiences(),knowledge})
-    return { ok: true, job, assessment, relatedKnowledge:knowledge, statusLabel: STATUS_LABEL[job.status] }
+    const view=buildJob360(repos,id)
+    view.job.statusDisplay=view.statusLabel
+    return {ok:true,...view}
   })
 
   route('GET', '/resume/quality', ({ query }) => {

@@ -161,3 +161,96 @@ test('existing application navigates with job context; repeated create clicks sh
   assert.equal(app.calls.filter(([method, url]) => method === 'POST' && url === '/application').length, 1)
   assert.ok(text(tree).indexOf('工作职责') < text(tree).indexOf('基本信息') || text(tree).includes('JD 正文未知'))
 })
+
+const flush = () => new Promise((resolve) => setImmediate(resolve))
+async function openJob(app, id = 'j1') {
+  app.render()
+  app.states[stateIndex('list')] = { jobs: [{ id, title: '岗位' }] }
+  nodes(app.render()).find((n) => n.type === 'button').props.onClick()
+  await flush()
+  return app.render()
+}
+
+test('Job360 integrates company intelligence and resume preparation without replacing main detail', async () => {
+  const job360 = {
+    company: { id: 'c1', name: '某公司', business: '企业服务', industry: '软件', careersUrl: 'https://example.com/jobs', units: [{ id: 'u1', name: '核心部门', business: '协作产品' }], reports: [{ id: 'r1', title: '公司简报', body: '公开研究事实' }] },
+    knowledge: [{ id: 'k1', title: '真实面经', kind: 'interview', platform: 'nowcoder', completeness: 'full', publishedAt: '2026-10-01', body: '面试过程摘录', url: 'https://example.com/interview' }],
+    resumePlan: { selected: [{ id: 'e1', organization: '实习公司', role: '产品实习', bullets: 3 }], gaps: ['待确认到岗日期'], quality: { issues: [{ message: '教育时间缺失' }] }, skillAdvice: { summary: '突出真实成果', perBullet: [{ bullet: '完成用户调研', issues: ['补充真实样本规模'], skillIds: ['quantify'] }], jdCoverage: { missing: ['SQL'], note: '仅按已存JD比对' } } },
+    application: null, resumeVersions: [{ id: 'v1', label: '产品版' }],
+  }
+  const app = harness({ get: () => ({ job: { id: 'j1', title: '产品岗位', description: '岗位职责正文', requirements: '学历条件' }, assessment: {}, job360 }) })
+  const tree = await openJob(app)
+  assert.deepEqual(app.states[stateIndex('job360')], job360)
+  assert.deepEqual(nodes(tree).filter((n) => n.props['data-job360']).map((n) => n.props['data-job360']).sort(), ['intelligence', 'job', 'match', 'preparation'])
+  for (const value of ['岗位职责正文', '学历条件', '企业服务', '核心部门', '公司简报', '真实面经', '面试过程摘录', '实习公司', '建议保留 3 条', '待确认到岗日期', '教育时间缺失', '突出真实成果', '完成用户调研', '补充真实样本规模', 'JD 待覆盖关键词：SQL']) assert.ok(text(tree).includes(value), value)
+  assert.match(text(tree), /不会向外部网站投递/)
+  assert.ok(nodes(tree).find((n) => n.type === 'option' && n.props.value === 'v1'))
+  assert.doesNotMatch(text(tree), /\[object Object\]|\{"/)
+})
+
+test('Job360 draft submits selected version and user fields once, then locates existing application', async () => {
+  const job360 = { application: null, resumeVersions: [{ id: 'v1', label: '产品版' }] }
+  const app = harness({ get: (url) => url.startsWith('/job?') ? { job: { id: 'j1', title: '岗位' }, job360 } : { jobs: [] } })
+  let tree = await openJob(app)
+  const button = (label) => nodes(tree).find((n) => n.type === 'Btn' && text(n) === label)
+  assert.equal(button('保存申请草稿').props.disabled, true)
+  for (const [label, value] of [['申请草稿简历版本', 'v1'], ['申请草稿渠道', ' 官网 '], ['申请草稿下一步日期', '2026-11-20'], ['申请草稿备注', ' 先核对JD ']]) {
+    nodes(tree).find((n) => n.props['aria-label'] === label).props.onChange({ target: { value } }); tree = app.render()
+  }
+  const save = button('保存申请草稿').props.onClick
+  await Promise.all([save(), save()])
+  const posts = app.calls.filter(([method, url]) => method === 'POST' && url === '/application')
+  assert.deepEqual(posts, [['POST', '/application', { jobId: 'j1', status: 'saved', resumeVersionId: 'v1', channel: '官网', nextActionAt: '2026-11-20', notes: '先核对JD' }]])
+  tree = app.render(); button('定位已有申请记录').props.onClick()
+  assert.deepEqual(app.navigation.at(-1), ['tracker', 'j1'])
+})
+
+test('Job360 missing research has explicit navigation actions, preserving job context without pretending a search ran', async () => {
+  const app = harness(); const tree = await openJob(app)
+  for (const type of ['intelligence', 'preparation', 'match', 'job']) {
+    const section = nodes(tree).find((n) => n.props['data-job360'] === type)
+    assert.ok(section, type); assert.ok(nodes(section).some((n) => n.type === 'Btn'), `${type} empty state action`)
+  }
+  assert.match(text(tree), /未研究/); assert.match(text(tree), /未执行 AI 研究/); assert.match(text(tree), /尚无可用经历方案/)
+  nodes(tree).find((n) => n.type === 'Btn' && text(n).startsWith('去知识库检索')).props.onClick()
+  assert.deepEqual(app.navigation.at(-1), ['social', 'j1'])
+  assert.match(text(tree), /需手动输入公司 \/ 岗位/)
+})
+
+test('Job360 state and draft fields clear immediately on job switch; late response cannot restore old company', async () => {
+  const pending = []
+  const app = harness({ get: (url) => new Promise((resolve) => pending.push({ url, resolve })) })
+  app.render(); app.states[stateIndex('list')] = { jobs: [{ id: 'j1', title: '岗位一' }, { id: 'j2', title: '岗位二' }] }
+  let tree = app.render()
+  const buttons = () => nodes(tree).filter((n) => n.type === 'button')
+  buttons()[0].props.onClick()
+  app.states[stateIndex('job360')] = { company: { name: '旧公司' } }
+  app.states[stateIndex('draftForm')] = { resumeVersionId: 'old', channel: '旧渠道', nextActionAt: '', notes: '旧备注' }
+  buttons()[1].props.onClick()
+  assert.equal(app.states[stateIndex('job360')], null)
+  assert.deepEqual(app.states[stateIndex('draftForm')], { resumeVersionId: '', channel: '', nextActionAt: '', notes: '' })
+  pending[1].resolve({ job: { id: 'j2' }, job360: { company: { name: '新公司' } } }); await flush()
+  pending[0].resolve({ job: { id: 'j1' }, job360: { company: { name: '旧公司' } } }); await flush()
+  assert.equal(app.states[stateIndex('job360')].company.name, '新公司')
+  assert.equal(app.states[stateIndex('detail')].id, 'j2')
+})
+
+test('server status display and evidence override historical OPEN; unreliable matches are not bare scores', () => {
+  const app = harness(); app.render()
+  app.states[stateIndex('list')] = { jobs: [{ id: 'j1', title: '岗位', status: 'OPEN', statusDisplay: '过期，需重新核验', statusEvidenceLevel: 'C', matchScore: 99, matchReliable: false }, { id: 'j2', status: 'OPEN' }] }
+  const tree = app.render()
+  assert.match(text(tree), /过期，需重新核验/); assert.match(text(tree), /证据等级 C/)
+  assert.match(text(tree), /历史记录在招（当前待核实）/); assert.match(text(tree), /匹配待核对/)
+  assert.ok(!nodes(tree).some((n) => n.type === 'Score' && n.props.value === 99))
+})
+
+test('fresh Job360 application prevents duplicate drafts even when detail.application is absent', async () => {
+  let fresh = false
+  const app = harness({ get: (url) => url.startsWith('/job?') ? { job: { id: 'j1' }, job360: { application: fresh ? { id: 'a-existing' } : null, resumeVersions: [{ id: 'v1', label: '版本' }] } } : { jobs: [] } })
+  let tree = await openJob(app)
+  nodes(tree).find((n) => n.props['aria-label'] === '申请草稿简历版本').props.onChange({ target: { value: 'v1' } })
+  fresh = true; tree = app.render()
+  await nodes(tree).find((n) => n.type === 'Btn' && text(n) === '保存申请草稿').props.onClick()
+  assert.ok(!app.calls.some(([method]) => method === 'POST'))
+  assert.deepEqual(app.navigation.at(-1), ['tracker', 'j1'])
+})

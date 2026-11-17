@@ -1,5 +1,5 @@
 // OfferShow公开薪资热榜：只保存页面原始口径，不把“78”等数字猜成年薪/万元。
-import {capturePageText} from './browser.js'
+import {capturePageText,checkpoint,remainingTimeout} from './browser.js'
 export function parseSalaryHighlightsFromText(text) {
   const block=/薪资\s*\n招聘\s*\nWLB\s*\n([\s\S]*?)查看更多/.exec(String(text??''))?.[1]
   if(!block)return []
@@ -14,10 +14,17 @@ export function parseSalaryHighlightsFromText(text) {
   }
   return rows
 }
-export async function fetchOfferShowSalaryHighlights({dataDir,company,captureText=capturePageText}={}) {
-  const page=await captureText({dataDir,url:'https://www.offershow.cn/',timeoutMs:12000})
-  if(!page.ok)return {ok:false,error:page.error??'首页薪资热榜不可读'}
+export async function fetchOfferShowSalaryHighlights({dataDir,company,signal,deadlineAt,timeoutMs=12000,budget,captureText=capturePageText}={}) {
+  signal ??= budget?.signal
+  deadlineAt=Math.min(deadlineAt??Infinity,budget?.deadline??Infinity,Date.now()+timeoutMs)
+  try {
+  const options={signal,deadlineAt};checkpoint(options)
+  const read=()=>captureText({dataDir,url:'https://www.offershow.cn/',signal,deadlineAt,timeoutMs:remainingTimeout(timeoutMs,options)})
+  const page=await (budget?budget.visit('offershow:salary',read):read())
+  checkpoint(options)
+  if(!page.ok)return {ok:false,stage:page.stage,error:page.error??'首页薪资热榜不可读'}
   const rows=parseSalaryHighlightsFromText(page.text)
   const selected=company?rows.filter(r=>r.company.toLowerCase().includes(String(company).toLowerCase())):rows
   return {ok:rows.length>0,scope:'仅首页公开薪资热榜，不是完整薪资库或指定岗位搜索',found:rows.length,matched:selected.length,reports:selected,checkedAt:new Date().toISOString(),caveat:'匿名用户原始表述；单位、年份、级别可能缺失，不据此推断目标岗位薪资或官方待遇。'}
+  } catch(error) {return {ok:false,stage:error.stage??(signal?.aborted?'cancelled':Date.now()>=deadlineAt?'deadline':'budget'),error:error.message}}
 }

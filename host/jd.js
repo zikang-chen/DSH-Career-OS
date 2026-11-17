@@ -6,7 +6,7 @@
 //
 // 设计：按站点注册「详情提供方」，每个提供方说清楚「怎么拼 URL、怎么从响应里取字段」。
 // 认不出的站点就诚实返回 unsupported，不猜接口。
-import { capturePageText } from './browser.js'
+import { capturePageText, checkpoint, remainingTimeout } from './browser.js'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 // 长正文不能只保留开头一两千字；同时限制单字段大小，避免整页导航无限落库。
@@ -142,7 +142,11 @@ export function resolveJdProvider({ applyUrl, url, sourceUrl } = {}) {
  * @param {{provider:object, postId?:string, jobCode?:string, url?:string, dataDir?:string, timeoutMs?:number, captureText?:Function}} input
  * @returns {{ok:boolean, description?, requirements?, location?, title?, department?, error?:string, unsupported?:boolean}}
  */
-export async function fetchJdDetail({ provider, postId, jobCode, url, dataDir, timeoutMs = 15000, captureText = capturePageText } = {}) {
+export async function fetchJdDetail({ provider, postId, jobCode, url, dataDir, timeoutMs = 15000, signal, deadlineAt, budget, captureText = capturePageText } = {}) {
+  signal ??= budget?.signal
+  deadlineAt = Math.min(deadlineAt ?? Infinity, budget?.deadline ?? Infinity, Date.now() + Math.max(0, timeoutMs))
+  const options = { signal, deadlineAt }
+  try { budget?.check(); checkpoint(options) } catch (error) { return { ok: false, stage: error.stage ?? (signal?.aborted ? 'cancelled' : 'deadline'), error: error.message } }
   if (!provider) return { ok: false, unsupported: true, error: '这家公司的详情接口没有登记，无法自动补 JD' }
 
   if (provider.mode === 'page') {
@@ -151,8 +155,9 @@ export async function fetchJdDetail({ provider, postId, jobCode, url, dataDir, t
     if (!dataDir && captureText === capturePageText) return { ok: false, ...emptyJd('缺少 dataDir（页面模式需要专用浏览器）') }
     const selectors = Array.isArray(provider.selectors) ? provider.selectors : []
     try {
-      const page = await captureText({ dataDir, url, timeoutMs: Math.max(timeoutMs, 12000), selectors })
-      if (!page?.ok || page.error) return { ok: false, ...emptyJd(page?.error ?? '页面读取失败') }
+      const page = await captureText({ dataDir, url, timeoutMs: remainingTimeout(timeoutMs, options), signal, deadlineAt, selectors })
+      if (!page?.ok || page.error) return { ok: false, stage: page?.stage, ...emptyJd(page?.error ?? '页面读取失败') }
+      checkpoint(options)
       const blocked = blockedPageReason({ url: page.url ?? url, title: page.title, text: page.text })
       if (blocked) return { ok: false, ...emptyJd(blocked) }
       if (page.url && provider.host && !provider.host.test(new URL(page.url).hostname)) {
@@ -171,7 +176,7 @@ export async function fetchJdDetail({ provider, postId, jobCode, url, dataDir, t
       if (!cut.description && !cut.requirements) return { ok: false, ...emptyJd(cut.error ?? '详情页没有可验证的 JD 正文') }
       return { ok: true, description: cut.description, requirements: cut.requirements, pageTitle: page.title ?? null }
     } catch (err) {
-      return { ok: false, ...emptyJd(`页面读取失败：${String(err?.message ?? err)}`) }
+      return { ok: false, stage: err.stage ?? (signal?.aborted ? 'cancelled' : Date.now() >= deadlineAt ? 'deadline' : 'capture'), ...emptyJd(`页面读取失败：${String(err?.message ?? err)}`) }
     }
   }
 
@@ -180,7 +185,9 @@ export async function fetchJdDetail({ provider, postId, jobCode, url, dataDir, t
     return { ok: false, error: provider.need === 'postId' ? '缺少 postId（列表接口没给，需要重新抓一次列表）' : '缺少岗位编号' }
   }
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const timer = setTimeout(() => controller.abort(), remainingTimeout(timeoutMs, options))
+  const cancel = () => controller.abort()
+  signal?.addEventListener('abort', cancel, { once: true })
   try {
     const response = await fetch(provider.buildUrl({ postId, jobCode }), {
       headers: { 'user-agent': UA, accept: 'application/json', referer: provider.referer ?? '' },
@@ -189,12 +196,14 @@ export async function fetchJdDetail({ provider, postId, jobCode, url, dataDir, t
     })
     if (!response.ok) return { ok: false, error: `HTTP ${response.status}` }
     const json = await response.json()
+    checkpoint(options)
     const picked = provider.pick(json)
     if (!picked) return { ok: false, error: '响应里没有 JD 正文（接口结构可能变了）' }
     return { ok: true, ...picked }
   } catch (err) {
-    return { ok: false, error: controller.signal.aborted ? `超时（${timeoutMs}ms）` : String(err?.message ?? err) }
+    return { ok: false, stage: signal?.aborted ? 'cancelled' : controller.signal.aborted || Date.now() >= deadlineAt ? 'deadline' : undefined, error: controller.signal.aborted ? `超时（${timeoutMs}ms）` : String(err?.message ?? err) }
   } finally {
     clearTimeout(timer)
+    signal?.removeEventListener('abort', cancel)
   }
 }

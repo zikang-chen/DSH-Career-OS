@@ -23,6 +23,31 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 const STATE_FILE = 'browser-state.json'
 
+export function checkpoint({ signal, deadlineAt = Infinity } = {}) {
+  if (signal?.aborted) throw Object.assign(new Error('研究已取消'), { stage: signal.reason?.stage ?? 'cancelled' })
+  if (Date.now() >= deadlineAt) throw Object.assign(new Error('研究已达到时间预算'), { stage: 'deadline' })
+}
+export function remainingTimeout(timeoutMs, options = {}) {
+  checkpoint(options)
+  return Math.max(1, Math.min(timeoutMs, options.deadlineAt == null ? Infinity : options.deadlineAt - Date.now()))
+}
+function captureScope({ timeoutMs, deadlineAt, signal }) {
+  const end = Math.min(Date.now() + Math.max(0, Number(timeoutMs) || 0), deadlineAt ?? Infinity)
+  const controller = new AbortController()
+  const cancel = () => controller.abort(signal.reason)
+  signal?.addEventListener('abort', cancel, { once: true })
+  if (signal?.aborted) cancel()
+  const timer = setTimeout(() => controller.abort(Object.assign(new Error('研究已达到时间预算'), { stage: 'deadline' })), Math.max(0, end - Date.now()))
+  return { signal: controller.signal, deadlineAt: end,
+    stage: () => signal?.aborted ? 'cancelled' : controller.signal.aborted || Date.now() >= end ? 'deadline' : 'browser',
+    dispose() { clearTimeout(timer); signal?.removeEventListener('abort', cancel) } }
+}
+async function budgetSleep(ms, options) {
+  await sleep(remainingTimeout(ms, options), undefined, { signal: options.signal })
+  checkpoint(options)
+}
+const browserStarts = new Map()
+
 /** 找本机可用的 Chromium 内核浏览器（Edge 在 Win10/11 上基本必有）。 */
 export function findBrowserExecutable() {
   const env = process.env
@@ -74,9 +99,12 @@ export function freePort() {
   })
 }
 
-async function cdpVersion(port, timeoutMs = 1500) {
+async function cdpVersion(port, timeoutMs = 1500, options = {}) {
+  timeoutMs = remainingTimeout(timeoutMs, options)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const cancel = () => controller.abort()
+  options.signal?.addEventListener('abort', cancel, { once: true })
   try {
     const response = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: controller.signal })
     if (!response.ok) return null
@@ -85,6 +113,8 @@ async function cdpVersion(port, timeoutMs = 1500) {
     return null
   } finally {
     clearTimeout(timer)
+    options.signal?.removeEventListener('abort', cancel)
+    checkpoint(options)
   }
 }
 
@@ -92,18 +122,42 @@ async function cdpVersion(port, timeoutMs = 1500) {
  * 启动（或复用）专用浏览器。
  * @returns {{ok:boolean, port:number|null, executable:string|null, profileDir:string, started:boolean, error?:string}}
  */
-export async function ensureBrowser({ dataDir, logger, extraArgs = [], noProxy = false, foreground = false } = {}) {
+export async function ensureBrowser(options = {}) {
+  const key = path.resolve(options.dataDir)
+  try {
+    checkpoint(options)
+    // Serialize all starts for one profile (including callers with different proxy modes).
+    while (browserStarts.has(key)) {
+      // Cancel this waiter, not another caller's shared startup.
+      await new Promise((resolve, reject) => {
+        const done = () => { clearTimeout(timer); options.signal?.removeEventListener('abort', cancel) }
+        const cancel = () => { done(); reject(Object.assign(new Error('研究已取消'), { stage: 'cancelled' })) }
+        const timer = setTimeout(() => { done(); reject(Object.assign(new Error('研究已达到时间预算'), { stage: 'deadline' })) }, remainingTimeout(2147483647, options))
+        options.signal?.addEventListener('abort', cancel, { once: true })
+        browserStarts.get(key).then(() => { done(); resolve() }, () => { done(); resolve() })
+      })
+      checkpoint(options)
+    }
+    const pending = startBrowser(options)
+    browserStarts.set(key, pending)
+    try { return await pending } finally { if (browserStarts.get(key) === pending) browserStarts.delete(key) }
+  } catch (error) { return { ok: false, stage: error.stage ?? (options.signal?.aborted ? 'cancelled' : 'browser'), error: error.message } }
+}
+async function startBrowser({ dataDir, logger, extraArgs = [], noProxy = false, foreground = false, signal, deadlineAt } = {}) {
+  const options = { signal, deadlineAt }
+  checkpoint(options)
   const profileDir = browserProfileDir(dataDir)
   const previous = readBrowserState(dataDir)
   if (previous?.port) {
-    const alive = await cdpVersion(previous.port)
+    const alive = await cdpVersion(previous.port, 1500, options)
     // 代理模式变了就得重启：正在跑的实例带着旧的网络设置。
     const sameMode = (previous.noProxy ?? false) === noProxy
     if (alive && sameMode) {
       return { ok: true, port: previous.port, executable: previous.executable ?? null, profileDir, started: false, note: '复用已运行的专用浏览器' }
     }
     if (alive && !sameMode) {
-      await closeBrowser({ dataDir, logger })
+      // A research deadline must never close a shared browser to switch modes.
+      return { ok: false, stage: 'browser', error: '专用浏览器代理模式不同，请显式关闭后重试' }
     }
   }
 
@@ -116,6 +170,7 @@ export async function ensureBrowser({ dataDir, logger, extraArgs = [], noProxy =
   }
 
   const port = await freePort()
+  checkpoint(options)
   fs.mkdirSync(profileDir, { recursive: true })
   const args = [
     `--remote-debugging-port=${port}`,
@@ -132,8 +187,11 @@ export async function ensureBrowser({ dataDir, logger, extraArgs = [], noProxy =
     'about:blank',
   ]
   try {
+    checkpoint(options)
     const child = spawn(executable, args, { detached: true, stdio: 'ignore', windowsHide: !foreground })
     child.unref()
+    // Keep the shared process discoverable even if its initiating research is cancelled.
+    writeBrowserState(dataDir, { port, executable, profileDir, noProxy, startedAt: new Date().toISOString() })
   } catch (err) {
     return { ok: false, port: null, executable, profileDir, started: false, error: String(err?.message ?? err) }
   }
@@ -141,8 +199,8 @@ export async function ensureBrowser({ dataDir, logger, extraArgs = [], noProxy =
   // 等调试端口就绪（首次启动可能要几秒）
   let info = null
   for (let attempt = 0; attempt < 40; attempt += 1) {
-    await sleep(250)
-    info = await cdpVersion(port)
+    await budgetSleep(250, options)
+    info = await cdpVersion(port, 1500, options)
     if (info) break
   }
   if (!info) {
@@ -167,7 +225,8 @@ export class CdpConnection {
     const socket = new WebSocket(this.wsUrl)
     this.socket = socket
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('CDP 连接超时')), timeoutMs)
+      const timer = setTimeout(() => { try { socket.close() } catch {} reject(new Error('CDP 连接超时')) }, timeoutMs)
+      socket.addEventListener('close', () => { clearTimeout(timer); reject(new Error('CDP 连接已关闭')) }, { once: true })
       socket.addEventListener('open', () => {
         clearTimeout(timer)
         resolve()
@@ -313,7 +372,7 @@ export function watchJsonResponses(cdp, sessionId, { patterns = [], prefer, vali
       const item = responses.get(p.requestId)
       if (!item || item.pending) return
       item.size = p.encodedDataLength ?? item.size
-      item.pending = cdp.send('Network.getResponseBody', { requestId: p.requestId }, sessionId, 3500).then((body) => {
+      item.pending = Promise.resolve().then(() => cdp.send('Network.getResponseBody', { requestId: p.requestId }, sessionId, 3500)).then((body) => {
         const text = body.base64Encoded ? Buffer.from(body.body, 'base64').toString('utf8') : body.body
         if (!text || text.length > 8 * 1024 * 1024) throw new Error('响应为空或超过 8MB 上限')
         item.json = JSON.parse(text)
@@ -356,20 +415,39 @@ async function pageSummary(cdp, sessionId) {
  */
 export async function capturePageJson({
   dataDir, url, matchUrl, patterns = ['job', 'post', 'position', 'search', 'campus', 'recruit'],
-  prefer = null, validateJson, search, signal, timeoutMs = 25000, logger,
+  prefer = null, validateJson, search, signal, deadlineAt, timeoutMs = 25000, logger,
 } = {}) {
-  const browser = await ensureBrowser({ dataDir, logger })
-  if (!browser.ok) return { ok: false, error: browser.error, browser }
+  const scope = captureScope({ timeoutMs, deadlineAt, signal })
+  let browser, cdp, rawCdp
+  let abortCleanup = () => {}
+  let cleanupPromise
+  const cleanupTarget = (method, params) => cleanupPromise ??= rawCdp.send(method, params, undefined, 1500).catch(() => {})
+  try {
+  checkpoint(scope)
+  browser = await ensureBrowser({ dataDir, logger, ...scope })
+  if (!browser.ok) return { ok: false, stage: browser.stage, error: browser.error, browser }
 
-  const info = await cdpVersion(browser.port)
+  const info = await cdpVersion(browser.port, 1500, scope)
   const wsUrl = info?.webSocketDebuggerUrl
   if (!wsUrl) return { ok: false, error: '拿不到 CDP WebSocket 地址', browser }
 
-  const cdp = await new CdpConnection(wsUrl).connect()
+  rawCdp = new CdpConnection(wsUrl)
+  const cancelConnect = () => rawCdp.close()
+  scope.signal.addEventListener('abort', cancelConnect, { once: true })
+  try { await rawCdp.connect(remainingTimeout(8000, scope)) }
+  finally { scope.signal.removeEventListener('abort', cancelConnect) }
+  checkpoint(scope)
+  cdp = Object.create(rawCdp)
+  cdp.send = (method, params = {}, sessionId, timeout = 8000) => rawCdp.send(method, params, sessionId, remainingTimeout(timeout, scope))
+  cdp.on = rawCdp.on.bind(rawCdp)
+  cdp.close = rawCdp.close.bind(rawCdp)
   let targetId = null
   let attached = null
   let reusedTab = false
   let watcher = null
+  const abortTarget = () => { abortCleanup = () => {}; watcher?.dispose(); if (targetId && !reusedTab) cleanupTarget('Target.closeTarget', { targetId }).finally(() => rawCdp.close()); else rawCdp.close() }
+  scope.signal.addEventListener('abort', abortTarget, { once: true })
+  abortCleanup = () => scope.signal.removeEventListener('abort', abortTarget)
   try {
 
     // 优先复用用户已经打开的标签页
@@ -416,12 +494,12 @@ export async function capturePageJson({
       let ready = false
       const searchStarted = Date.now()
       for (let i = 0; i < 32 && Date.now() - searchStarted < 12000; i++) {
-        await sleep(350)
+        await budgetSleep(350, scope)
         const r = await cdp.send('Runtime.evaluate', {expression:`Boolean(document.querySelector(${JSON.stringify(search.selector)}))`,returnByValue:true},sessionId,2000).catch(()=>null)
         if (r?.result?.value) {ready=true;break}
       }
       if (!ready) throw new Error('搜索输入框未出现（可能需要登录/验证）')
-      await sleep(500)
+      await budgetSleep(500, scope)
       await cdp.send('Runtime.evaluate', {expression:`(()=>{const n=document.querySelector(${JSON.stringify(search.selector)});const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;setter.call(n,${JSON.stringify(search.keyword)});n.dispatchEvent(new Event('input',{bubbles:true}));n.dispatchEvent(new Event('change',{bubbles:true}));n.focus()})()`},sessionId,2000)
       watcher.responses.clear()
       await cdp.send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'},sessionId,2000)
@@ -429,16 +507,18 @@ export async function capturePageJson({
     }
 
     const started = Date.now()
-    const budget = Math.max(4000, Math.min(Number(timeoutMs) || 25000, 60000))
+    const budget = scope.deadlineAt - started
     while (Date.now() - started < budget) {
-      if(signal?.aborted)throw new Error('研究已取消')
-      await sleep(250)
+      checkpoint(scope)
+      await budgetSleep(250, scope)
       const best = watcher.best()
       // 没拿到真正的数据不能因一个配置/登录响应就提前成功。
       if (best && Date.now() - started >= 4000 && (!prefer || new RegExp(prefer, 'i').test(best.url))) break
     }
+    checkpoint(scope)
     const best = watcher.best()
     const page = await pageSummary(cdp, sessionId)
+    checkpoint(scope)
     const candidates = watcher.candidates()
     if (!best) {
       const login = /\/web\/user\/|\/login(?:[/?#]|$)|passport/i.test(page.url)
@@ -450,23 +530,44 @@ export async function capturePageJson({
     return { ok: true, captured: { url: publicBrowserUrl(best.url), status: best.status, bytes: best.bytes, json: best.json },
       page: { url: page.url, title: page.title }, candidates, reusedTab, browser }
   } catch (err) {
-    return { ok: false, stage: 'browser', error: String(err.message), candidates: watcher?.candidates() ?? [], reusedTab, browser }
+    return { ok: false, stage: err.stage ?? scope.stage(), error: String(err.message), candidates: watcher?.candidates() ?? [], reusedTab, browser }
   } finally {
     watcher?.dispose()
-    if (targetId && !reusedTab) await cdp.send('Target.closeTarget', { targetId }, undefined, 1500).catch(() => {})
-    if (reusedTab && attached?.sessionId) await cdp.send('Target.detachFromTarget', { sessionId: attached.sessionId }, undefined, 1500).catch(() => {})
+    if (targetId && !reusedTab) await cleanupTarget('Target.closeTarget', { targetId })
+    if (reusedTab && attached?.sessionId) await cleanupTarget('Target.detachFromTarget', { sessionId: attached.sessionId })
     cdp.close()
   }
+  } catch (err) { return { ok: false, stage: err.stage ?? scope.stage(), error: String(err.message) } }
+  finally { abortCleanup(); rawCdp?.close(); scope.dispose() }
 }
 
 /** 读一个页面的渲染后正文（用于详情页是服务端渲染、接口抓不到的情况）。 */
-export async function capturePageText({ dataDir, url, selectors = [], timeoutMs = 18000, signal, logger } = {}) {
-  const browser = await ensureBrowser({ dataDir, logger })
-  if (!browser.ok) return { ok: false, error: browser.error }
-  const info = await cdpVersion(browser.port)
+export async function capturePageText({ dataDir, url, selectors = [], timeoutMs = 18000, signal, deadlineAt, logger } = {}) {
+  const scope = captureScope({ timeoutMs, deadlineAt, signal })
+  let browser, cdp, rawCdp
+  let abortCleanup = () => {}
+  let cleanupPromise
+  const cleanupTarget = (method, params) => cleanupPromise ??= rawCdp.send(method, params, undefined, 1500).catch(() => {})
+  try {
+  checkpoint(scope)
+  browser = await ensureBrowser({ dataDir, logger, ...scope })
+  if (!browser.ok) return { ok: false, stage: browser.stage, error: browser.error }
+  const info = await cdpVersion(browser.port, 1500, scope)
   if (!info?.webSocketDebuggerUrl) return { ok: false, error: '拿不到 CDP WebSocket 地址' }
-  const cdp = await new CdpConnection(info.webSocketDebuggerUrl).connect()
+  rawCdp = new CdpConnection(info.webSocketDebuggerUrl)
+  const cancelConnect = () => rawCdp.close()
+  scope.signal.addEventListener('abort', cancelConnect, { once: true })
+  try { await rawCdp.connect(remainingTimeout(8000, scope)) }
+  finally { scope.signal.removeEventListener('abort', cancelConnect) }
+  checkpoint(scope)
+  cdp = Object.create(rawCdp)
+  cdp.send = (method, params = {}, sessionId, timeout = 8000) => rawCdp.send(method, params, sessionId, remainingTimeout(timeout, scope))
+  cdp.on = rawCdp.on.bind(rawCdp)
+  cdp.close = rawCdp.close.bind(rawCdp)
   let targetId
+  const abortTarget = () => { abortCleanup = () => {}; if (targetId) cleanupTarget('Target.closeTarget', { targetId }).finally(() => rawCdp.close()); else rawCdp.close() }
+  scope.signal.addEventListener('abort', abortTarget, { once: true })
+  abortCleanup = () => scope.signal.removeEventListener('abort', abortTarget)
   try {
     ;({ targetId } = await cdp.send('Target.createTarget', { url: 'about:blank', background: true }))
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true })
@@ -475,9 +576,9 @@ export async function capturePageText({ dataDir, url, selectors = [], timeoutMs 
     const expression = `JSON.stringify({url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,40000),sections:${JSON.stringify(selectors)}.map(selector=>({selector,text:Array.from(document.querySelectorAll(selector)).map(n=>n.innerText).join('\\n').slice(0,30000)})),links:Array.from(document.querySelectorAll('a[href]')).slice(0,120).map(a=>({text:(a.innerText||'').trim().slice(0,80),url:a.href})),images:Array.from(document.querySelectorAll('.note-slider-img img')).map(n=>({url:n.currentSrc||n.src,width:n.naturalWidth,height:n.naturalHeight})).filter(n=>n.width>250&&n.height>200).slice(0,30)})`
     const started = Date.now()
     let page = null
-    while (Date.now() - started < Math.max(4000, Math.min(timeoutMs || 18000, 45000))) {
-      if(signal?.aborted)throw new Error('研究已取消')
-      await sleep(650)
+    while (Date.now() - started < scope.deadlineAt - started) {
+      checkpoint(scope)
+      await budgetSleep(650, scope)
       const r = await cdp.send('Runtime.evaluate', { expression, returnByValue: true }, sessionId, 3000).catch(() => null)
       if (!r?.result?.value) continue
       page = JSON.parse(r.result.value)
@@ -485,14 +586,17 @@ export async function capturePageText({ dataDir, url, selectors = [], timeoutMs 
       if (page.sections.some(s => s.text.length > 60) || !selectors.length && page.text.length > 100) break
       if (/\/login|\/web\/user\//i.test(page.url) || /访问受限|安全验证|页面不存在/.test(page.title)) break
     }
+    checkpoint(scope)
     if (!page) return { ok: false, error: '页面正文读取超时', url: publicBrowserUrl(url) }
     return { ok: Boolean(page.text.trim()), ...page, url: publicBrowserUrl(page.url), links: page.links.map(l => ({...l, url:publicBrowserUrl(l.url)})) }
   } catch (err) {
-    return { ok: false, error: String(err.message), url: publicBrowserUrl(url) }
+    return { ok: false, stage: err.stage ?? scope.stage(), error: String(err.message), url: publicBrowserUrl(url) }
   } finally {
-    if (targetId) await cdp.send('Target.closeTarget', { targetId }, undefined, 1500).catch(() => {})
+    if (targetId) await cleanupTarget('Target.closeTarget', { targetId })
     cdp.close()
   }
+  } catch (err) { return { ok: false, stage: err.stage ?? scope.stage(), error: String(err.message) } }
+  finally { abortCleanup(); rawCdp?.close(); scope.dispose() }
 }
 
 /** 只开窗口让用户登录，不抓取。 */

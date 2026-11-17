@@ -610,6 +610,66 @@ function radarAssessmentText(value) {
   if (typeof value === 'object') return Object.entries(value).map(([key, item]) => `${key}: ${radarAssessmentText(item)}`).join(' · ') || '未知'
   return String(value)
 }
+// Job360 renders bounded, human-readable fields only; never dump backend payloads.
+function radarStatus(job) {
+  return typeof job.statusDisplay === 'string' && job.statusDisplay.trim() ? job.statusDisplay : job.status === 'OPEN' ? '历史记录在招（当前待核实）' : radarStatusLabels[job.status] ?? '状态未知'
+}
+function radarSafeUrl(value) { return typeof value === 'string' && /^https?:\/\//i.test(value) ? value : null }
+function radarItems(value) { return Array.isArray(value) ? value : [] }
+function radarNote(value) {
+  if (typeof value === 'string' || typeof value === 'number') return String(value)
+  return value && typeof value === 'object' ? [value.label ?? value.title ?? value.message ?? value.issue ?? value.skill ?? value.name, value.explanation ?? value.suggestion ?? value.advice ?? value.reason ?? value.text].filter((v) => typeof v === 'string').join(' · ') || '有待核对的准备事项，请到简历工作室查看' : '未记录'
+}
+function radarJob360Company(data, detail, navigate) {
+  const company = data?.company
+  const action = h(Btn, { onClick: () => navigate?.('social', detail.id) }, '去知识库检索（需手动输入公司 / 岗位）')
+  const missing = (title) => h('div', { style: S.cardTight }, h('div', { style: S.muted }, `${title}：未研究 / 暂无已入库资料，不代表不存在。`), action)
+  const link = (url, label) => radarSafeUrl(url) ? h('a', { href: url, target: '_blank', rel: 'noreferrer', style: { color: T.accent } }, label) : null
+  return h('details', { style: S.cardTight, 'data-job360': 'intelligence' },
+    h('summary', { style: { ...S.h3, cursor: 'pointer' } }, '公司与情报聚合'),
+    company ? h('section', { style: S.cardTight }, h('div', { style: S.h3 }, company.name || '公司档案'),
+      h('div', { style: S.body }, radarNote(company.business || '主营业务尚未研究')),
+      h('div', { style: S.muted }, `行业：${radarNote(company.industry || '未研究')}`), link(company.careersUrl, '官方招聘入口'),
+      h(Btn, { onClick: () => navigate?.('company', company.id) }, '查看公司档案')) : missing('公司档案'),
+    h('div', { style: S.h3 }, '业务部门'),
+    radarItems(company?.units).length ? radarItems(company.units).map((unit, i) => h('div', { key: unit.id || i, style: S.cardTight }, h('div', { style: S.body }, unit.name || '未命名部门'), h('div', { style: S.muted }, radarNote(unit.business || unit.summary || '业务职责未研究')))) : missing('业务部门'),
+    h('div', { style: S.h3 }, '公司研究简报'),
+    radarItems(company?.reports).length ? radarItems(company.reports).map((report, i) => h('div', { key: report.id || i, style: S.cardTight }, h('div', { style: S.body }, report.title || '未命名简报'), h('div', { style: S.muted }, radarNote(report.summary || report.body || '无摘要，请查看公司档案').slice(0, 500)), h(Btn, { onClick: () => navigate?.('company', company.id) }, '查看研究简报'))) : missing('公司研究'),
+    h('div', { style: S.h3 }, '相关知识库资料'),
+    radarItems(data?.knowledge).length ? radarItems(data.knowledge).map((item, i) => h('article', { key: item.id || i, style: S.cardTight }, h('div', { style: S.h3 }, item.title || '未命名资料'),
+      h('div', { style: S.muted }, `${radarNote(item.kind)} · ${radarNote(item.platform)} · 完整度 ${radarNote(item.completeness)} · ${item.publishedAt ? fmtDate(item.publishedAt) : '发布时间未知'}`),
+      h('div', { style: { ...S.body, whiteSpace: 'pre-wrap' } }, typeof item.body === 'string' && item.body.trim() ? item.body.slice(0, 700) : '正文未取得，请检索资料或打开来源核对。'), link(item.url, '核对原文'), action)) : missing('相关情报'),
+    h('div', { style: S.muted }, '以上仅聚合本地已有资料，未执行 AI 研究；来源缺失或正文不全需另行核对。'), action,
+    data?.sourceHealth ? h('div', { style: S.muted }, `数据源：${radarNote(data.sourceHealth.summary || data.sourceHealth.status || '请到数据源设置核对覆盖与失败情况')}`) : null,
+    h(Btn, { kind: 'ghost', onClick: () => navigate?.('settings') }, '查看数据源与覆盖'))
+}
+function radarJob360Preparation(data, detail, form, setForm, saveDraft, busy, navigate) {
+  const plan = data?.resumePlan
+  const application = data?.application || detail.application
+  const studio = (label) => h(Btn, { onClick: () => navigate?.('studio', detail.id) }, label)
+  const list = (title, values, empty) => h('section', { style: S.cardTight }, h('div', { style: S.h3 }, title), radarItems(values).length ? radarItems(values).map((value, i) => h('div', { key: i, style: S.muted }, radarNote(value))) : h('div', { style: S.muted }, empty), studio('去简历工作室核对'))
+  return h('details', { style: S.cardTight, 'data-job360': 'preparation' },
+    h('summary', { style: { ...S.h3, cursor: 'pointer' } }, '申请准备'),
+    h('div', { style: S.muted }, '仅保存本地申请草稿，不会向外部网站投递，也不会标记为已投递。'),
+    h('section', { style: S.cardTight }, h('div', { style: S.h3 }, '建议展示的真实经历'),
+      radarItems(plan?.selected).length ? radarItems(plan.selected).map((entry, i) => h('div', { key: entry.id || i, style: S.cardTight }, h('div', { style: S.body }, [entry.organization, entry.role].filter(Boolean).join(' · ') || '经历待核对'), typeof entry.bullets === 'number' ? h('div', { style: S.muted }, `建议保留 ${entry.bullets} 条已存要点；请到工作室核对原文。`) : radarItems(entry.bullets).map((bullet, j) => h('div', { key: j, style: S.muted }, `· ${radarNote(bullet)}`)))) : h('div', { style: S.muted }, '尚无可用经历方案，未完成简历准备；请先导入并确认真实经历。'), studio('完善此岗位简历')),
+    list('待补缺口', plan?.gaps, '暂无已记录缺口，不代表已满足全部要求。'),
+    list('简历质量检查', plan?.quality?.issues || plan?.quality, '暂无质量检查结果，请到简历工作室检查。'),
+    h('section', { style: S.cardTight }, h('div', { style: S.h3 }, '要点改写建议'),
+      plan?.skillAdvice?.summary ? h('div', { style: S.muted }, radarNote(plan.skillAdvice.summary)) : null,
+      radarItems(plan?.skillAdvice?.perBullet).length ? radarItems(plan.skillAdvice.perBullet).map((item, i) => h('div', { key: i, style: S.cardTight }, h('div', { style: S.body }, radarNote(item.bullet)),
+        radarItems(item.issues).length ? radarItems(item.issues).map((issue, j) => h('div', { key: j, style: S.muted }, radarNote(issue))) : h('div', { style: S.muted }, '此要点未记录诊断问题，仍需人工核对。'))) : radarItems(plan?.skillAdvice).length ? radarItems(plan.skillAdvice).map((advice, i) => h('div', { key: i, style: S.muted }, radarNote(advice))) : h('div', { style: S.muted }, '暂无逐条要点诊断，请核对真实素材；不补造经历。'),
+      h('div', { style: S.muted }, `JD 待覆盖关键词：${radarItems(plan?.skillAdvice?.jdCoverage?.missing).map(radarNote).join('、') || '暂无已记录结果，不代表全部覆盖'}`),
+      plan?.skillAdvice?.jdCoverage?.note ? h('div', { style: S.muted }, radarNote(plan.skillAdvice.jdCoverage.note)) : null,
+      studio('去工作室检查要点与关键词')),
+    application ? h('div', { style: S.cardTight }, h('div', { style: S.muted }, '此岗位已有申请记录，请在进度页继续维护，避免重复创建。'), h(Btn, { kind: 'primary', onClick: () => navigate?.('tracker', detail.id) }, '定位已有申请记录')) : h('div', { style: S.col },
+      h(Field, { label: '选择简历版本（申请草稿）' }, h('select', { 'aria-label': '申请草稿简历版本', style: S.input, value: form.resumeVersionId, onChange: (e) => setForm({ ...form, resumeVersionId: e.target.value }) }, h('option', { value: '' }, '请选择已保存的简历版本'), radarItems(data?.resumeVersions).map((version) => h('option', { key: version.id, value: version.id }, version.label || version.id)))),
+      !radarItems(data?.resumeVersions).length ? h('div', null, h('div', { style: S.muted }, '暂无已保存简历，请先在工作室保存版本；也可用顶部「加入投递」仅收藏岗位。'), studio('创建简历版本')) : null,
+      h(Field, { label: '投递渠道' }, h('input', { 'aria-label': '申请草稿渠道', style: S.input, value: form.channel, onChange: (e) => setForm({ ...form, channel: e.target.value }), placeholder: '如官网 / 内推（仅记录）' })),
+      h(Field, { label: '下一步日期' }, h('input', { 'aria-label': '申请草稿下一步日期', type: 'date', style: S.input, value: form.nextActionAt, onChange: (e) => setForm({ ...form, nextActionAt: e.target.value }) })),
+      h(Field, { label: '准备备注' }, h('textarea', { 'aria-label': '申请草稿备注', style: S.textarea, value: form.notes, onChange: (e) => setForm({ ...form, notes: e.target.value }) })),
+      h(Btn, { kind: 'primary', disabled: busy || !form.resumeVersionId, onClick: saveDraft }, busy ? '保存草稿中…' : '保存申请草稿')))
+}
 function RadarTab({ focusCode, onChanged, onNavigate }) {
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('')
@@ -624,6 +684,8 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
   const limit = 20
   const [viewMode, setViewMode] = useState('table')
   const [assessment, setAssessment] = useState(null)
+  const [job360, setJob360] = useState(null)
+  const [draftForm, setDraftForm] = useState({ resumeVersionId: '', channel: '', nextActionAt: '', notes: '' })
   const [verifySourceUrl, setVerifySourceUrl] = useState('')
   const [verifyEvidence, setVerifyEvidence] = useState('')
   const changeCondition = (setter, value) => { setOffset(0); setter(value) }
@@ -673,12 +735,15 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
     setSelected(id)
     setDetail(null)
     setAssessment(null)
+    setJob360(null)
+    setDraftForm({ resumeVersionId: '', channel: '', nextActionAt: '', notes: '' })
+    setError(null)
     setVerifySourceUrl('')
     setVerifyEvidence('')
     setDetailOpen(true)
     const request = ++detailRequest.current
     apiGet(`/job?id=${encodeURIComponent(id)}`).then((res) => {
-      if (request === detailRequest.current) { setDetail(res.job); setAssessment(res.assessment ?? null) }
+      if (request === detailRequest.current) { setDetail(res.job); setAssessment(res.assessment ?? null); setJob360(res.job360 ?? null) }
     }).catch((err) => { if (request === detailRequest.current) setError(err.message) })
   }, [])
 
@@ -721,22 +786,26 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
     }
   }
 
-  const track = async () => {
+  const track = async (draft = false) => {
     if (!detail) return
-    if (detail.application) { onNavigate?.('tracker', detail.id); return }
+    if (detail.application || job360?.application) { onNavigate?.('tracker', detail.id); return }
+    if (draft && (!draftForm.resumeVersionId || !radarItems(job360?.resumeVersions).some((version) => version.id === draftForm.resumeVersionId))) { setError('请先选择一个已保存的简历版本；仅收藏可用顶部「加入投递」。'); return }
     if (tracking.current) return
     tracking.current = true
+    const request = detailRequest.current
     setTrackingBusy(true)
+    setError(null)
     try {
       // Recheck before creating: another view may already have added this job.
       const fresh = await apiGet(`/job?id=${encodeURIComponent(detail.id)}`)
-      if (fresh.job.application) {
-        setDetail(fresh.job)
-        onNavigate?.('tracker', detail.id)
+      if (request !== detailRequest.current) return
+      if (fresh.job.application || fresh.job360?.application) {
+        if (request === detailRequest.current) { setDetail({ ...fresh.job, application: fresh.job.application || fresh.job360.application }); setJob360(fresh.job360 ?? null); onNavigate?.('tracker', detail.id) }
         return
       }
-      const res = await apiPost('/application', { jobId: detail.id, status: 'saved' })
+      const res = await apiPost('/application', { jobId: detail.id, status: 'saved', ...(draft ? { resumeVersionId: draftForm.resumeVersionId, channel: draftForm.channel.trim() || undefined, nextActionAt: draftForm.nextActionAt || undefined, notes: draftForm.notes.trim() || undefined } : {}) })
       setDetail((current) => current?.id === detail.id ? { ...current, application: res.application ?? { status: 'saved' } } : current)
+      setJob360((current) => current && detailRequest.current === request ? { ...current, application: res.application ?? { status: 'saved' } } : current)
       onChanged?.()
       load()
     } catch (err) {
@@ -760,7 +829,7 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
         h('td', { style: cellStyle }, h('button', { type: 'button', onClick: () => openDetail(job.id), style: { border: 0, background: 'none', color: T.accent, cursor: 'pointer', textAlign: 'left', padding: 0 } }, radarText(job.title))),
         h('td', { style: cellStyle }, radarRecruitLabels[radarValue(job, 'recruitType', 'recruit_type')] ?? '未知'),
         h('td', { style: cellStyle }, radarText(job.location)),
-        h('td', { style: cellStyle }, h(Chip, { tone: statusTone(job.status) }, radarStatusLabels[job.status] ?? '状态未知')),
+        h('td', { style: cellStyle }, h(Chip, { tone: job.status === 'OPEN' && !job.statusDisplay ? 'warn' : statusTone(job.status) }, radarStatus(job)), job.statusEvidenceLevel ? h('div', { style: S.muted }, `证据等级 ${radarNote(job.statusEvidenceLevel)}`) : null),
         h('td', { style: cellStyle }, job.deadline ? fmtDate(job.deadline) : '未知'),
         h('td', { style: cellStyle }, radarJD(job).label),
         h('td', { style: cellStyle }, h('div', { style: S.muted }, job.statusVerifiedAt || job.status_verified_at ? relTime(job.statusVerifiedAt ?? job.status_verified_at) : '核验未知'), h(Btn, { kind: 'ghost', onClick: () => openDetail(job.id) }, '详情 / 核验')))))))
@@ -791,8 +860,9 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
               h('div', { style: S.muted }, `截止 ${job.deadline ? fmtDate(job.deadline) : '未知'} · 来源 ${radarText(job.sourceName ?? job.source_name ?? job.sources?.[0]?.source_name ?? job.sources?.[0]?.source_type)} · 核验 ${job.statusVerifiedAt || job.status_verified_at ? relTime(job.statusVerifiedAt ?? job.status_verified_at) : '未知'}`),
               h('div', { style: { ...S.muted, color: radarJD(job).complete ? T.success : T.warn } }, radarJD(job).label)),
             h('div', { style: { ...S.row, gap: 6 } },
-              h(Chip, { tone: statusTone(job.status) }, radarStatusLabels[job.status] ?? job.statusLabel ?? '状态未知'),
-              h(Score, { value: job.matchScore }))),
+              h(Chip, { tone: job.status === 'OPEN' && !job.statusDisplay ? 'warn' : statusTone(job.status) }, radarStatus(job)),
+              job.statusEvidenceLevel ? h(Chip, null, `证据 ${radarNote(job.statusEvidenceLevel)}`) : null,
+              job.matchReliable === false ? h(Chip, { tone: 'warn' }, '匹配待核对（信息不足）') : h(Score, { value: job.matchScore }))),
         ))))
 
   return h('div', { style: S.col },
@@ -936,12 +1006,12 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
           : '加载中…',
         onClose: () => { detailRequest.current++; setDetailOpen(false); setSelected(null) },
       },
-        !detail ? h(Loading) : h('div', { style: S.col },
-
+        !detail ? (error ? h('div', { style: S.col }, h('div', { role: 'alert', style: { ...S.muted, color: T.error } }, error), h(Btn, { onClick: () => openDetail(selected) }, '重试岗位详情')) : h(Loading)) : h('div', { style: S.col },
+          error ? h('div', { role: 'alert', style: { ...S.muted, color: T.error } }, error) : null,
           // ① 顶部：状态 + 关键动作
           h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 } },
             h('div', { style: S.row },
-              h(Chip, { tone: statusTone(detail.status) }, radarStatusLabels[detail.status] ?? detail.statusLabel ?? '状态未知'),
+              h(Chip, { tone: statusTone(detail.status) }, radarStatus(detail)),
               detail.deadlineInDays !== null && detail.deadlineInDays !== undefined
                 ? h(Chip, { tone: detail.deadlineInDays < 0 ? 'error' : detail.deadlineInDays <= 7 ? 'warn' : undefined },
                   detail.deadlineInDays < 0 ? `已过截止 ${Math.abs(detail.deadlineInDays)} 天` : `距截止 ${detail.deadlineInDays} 天`)
@@ -955,14 +1025,15 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
                 : null,
               h(Btn, { onClick: () => onNavigate?.('studio', detail.id) }, '准备简历'),
               h(Btn, { onClick: () => onNavigate?.('interview', detail.id) }, 'JD 面试准备'),
-              h(Btn, { kind: 'primary', disabled: trackingBusy, onClick: track }, trackingBusy ? '处理中…' : detail.application ? '查看投递进度' : '加入投递'))),
+              h(Btn, { kind: 'primary', disabled: trackingBusy, onClick: () => track(false) }, trackingBusy ? '处理中…' : detail.application || job360?.application ? '查看投递进度' : '加入投递'))),
 
-          h('div', { style: S.muted }, `来源状态：${detail.statusLabel ?? detail.status ?? '未知'} · 核验 ${detail.status_verified_at ? relTime(detail.status_verified_at) : '未知'} · ${radarJD(detail).label}`),
+          h('div', { style: S.muted }, `来源状态：${radarStatus(detail)} · 证据等级 ${radarNote(detail.statusEvidenceLevel || '未知')} · 核验 ${detail.status_verified_at ? relTime(detail.status_verified_at) : '未知'} · ${radarJD(detail).label}`),
           h('div', { style: S.muted }, `主要来源：${radarText(detail.sources?.[0]?.source_name ?? detail.sources?.[0]?.source_type)}；${detail.sources?.[0]?.verification_status ?? '核验状态未知'}`),
           h('div', { style: { ...S.muted, whiteSpace: 'pre-wrap' } }, `硬条件（仅展示已记录事实）：学历 / 毕业要求 ${radarText(detail.grade_limit)} · 专业 ${radarText(detail.major_limit)} · 每周出勤 ${detail.days_per_week ? `${detail.days_per_week} 天` : '未知'} · 时长 ${radarText(detail.duration)}`),
 
-          h('details', { style: S.cardTight },
-            h('summary', { style: { ...S.h3, cursor: 'pointer' } }, 'Eligibility / Fit / Evidence · 资格、偏好与证据'),
+          h('details', { style: S.cardTight, 'data-job360': 'match' },
+            h('summary', { style: { ...S.h3, cursor: 'pointer' } }, '个人匹配 · Eligibility / Fit / Evidence · 资格、偏好与证据'),
+            !assessment ? h('div', null, h('div', { style: S.muted }, '尚无个人匹配评估，请确认画像并补全 JD 后重新检查。'), h(Btn, { onClick: () => onNavigate?.('resume') }, '完善求职画像')) : null,
             h('div', { style: S.muted }, `画像确认：${radarAssessmentText(assessment?.profileConfirmation)}；资格、偏好分与证据可靠性分别展示，匹配分不是录用概率。`),
             h('div', { style: S.grid(240) },
               h('section', null, h('div', { style: S.h3 }, 'Eligibility · 硬性资格'),
@@ -972,7 +1043,7 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
                   h('div', null, `岗位依据：${radarAssessmentText(check.jobEvidence)}`),
                   h('div', null, `画像依据：${radarAssessmentText(check.profileEvidence)}`)))),
               h('section', null, h('div', { style: S.h3 }, 'Fit · 偏好匹配'),
-                h('div', { style: S.muted }, `匹配分：${radarAssessmentText(assessment?.fit?.score)} · 可靠：${radarAssessmentText(assessment?.fit?.reliable)}`),
+                h('div', { style: S.muted }, `匹配分：${radarAssessmentText(assessment?.fit?.score)}${assessment?.fit?.reliable === false ? '（不可靠，仅供参考，请补全画像 / JD）' : ''} · 可靠：${radarAssessmentText(assessment?.fit?.reliable)}`),
                 h('div', { style: S.muted }, radarAssessmentText(assessment?.fit?.scoreMeaning)),
                 h('div', { style: S.muted }, `维度：${radarAssessmentText(assessment?.fit?.breakdown)}`),
                 h('div', { style: S.muted }, `理由：${radarAssessmentText(assessment?.fit?.reasons)}`),
@@ -991,6 +1062,11 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
             h('div', { style: S.muted }, `决策未知项：${radarAssessmentText(assessment?.decision?.unknowns)}`),
             h('div', { style: S.muted }, `下一步：${radarAssessmentText(assessment?.decision?.nextActions)}`)),
 
+          radarJob360Company(job360, detail, onNavigate),
+          radarJob360Preparation(job360, detail, draftForm, setDraftForm, () => track(true), trackingBusy, onNavigate),
+
+          h('details', { style: S.cardTight, open: true, 'data-job360': 'job' },
+          h('summary', { style: { ...S.h3, cursor: 'pointer' } }, '岗位信息 · 职责与硬条件'),
           // ④ JD 正文（没有就诚实说明，并指路）
           detail.description || detail.requirements
             ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
@@ -1007,7 +1083,8 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
               h('div', { style: S.h3 }, '岗位描述'),
               h('div', { style: S.muted }, 'JD 正文未知：尚未存入职责与任职要求，无法判断具体缺失原因；请到原始招聘页核对或补充正文。'),
               h('div', { style: { ...S.muted, marginTop: 4 } },
-                detail.apply_url ? '点上方「原始招聘页」核对完整 JD。' : '建议到官网搜索该岗位编号查看完整 JD。')),
+                detail.apply_url ? '点上方「原始招聘页」核对完整 JD。' : '建议到官网搜索该岗位编号查看完整 JD。'),
+              h(Btn, { onClick: () => onNavigate?.('social', detail.id) }, '去知识库补充岗位正文')),
 
           // ② 基本信息（未知显式呈现）
           h('div', { style: { ...S.cardTight, marginTop: 10 } },
@@ -1035,13 +1112,13 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
             ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
               h('div', { style: S.h3 }, '技能要求'),
               h('div', { style: { ...S.row, flexWrap: 'wrap', marginTop: 4 } }, detail.skills.map((s) => h(Chip, { key: s }, s))))
-            : null,
+            : null),
 
           // ③ 匹配解释
           detail.match?.reasons || detail.match?.score !== undefined && detail.match?.score !== null
             ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
               h('div', { style: S.h3 }, '匹配解释'),
-              h('div', { style: S.muted }, `匹配分 ${detail.match?.score ?? '未评分'}（与偏好的匹配度，不是录用概率）`),
+              h('div', { style: S.muted }, detail.matchReliable === false || assessment?.fit?.reliable === false ? '匹配信息不足，历史分数不作为可靠结论；请核对个人匹配评估。' : `匹配分 ${detail.match?.score ?? '未评分'}（与偏好的匹配度，不是录用概率）`),
               (detail.match?.reasons?.matched ?? []).slice(0, 6).map((m, i) => h('div', { key: `m${i}`, style: { ...S.muted, color: T.success } }, `✓ ${m}`)),
               (detail.match?.reasons?.missing ?? []).slice(0, 6).map((m, i) => h('div', { key: `x${i}`, style: { ...S.muted, color: T.warn } }, `! ${m}`)),
               (detail.match?.reasons?.unknown ?? []).slice(0, 4).map((m, i) => h('div', { key: `u${i}`, style: S.muted }, `? ${m}`)))

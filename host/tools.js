@@ -18,6 +18,8 @@ import { RESUME_SKILLS, analyzeBullets } from './resume_skills.js'
 import { captureSite, sourceHealthRows } from './site-capture.js'
 import { fetchOfferShowSalaryHighlights } from './offershow.js'
 import {processKnowledgeOcr,ocrStatus} from './ocr.js'
+import {buildJob360} from './job360.js'
+import {ResearchBudget} from './research-budget.js'
 import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
@@ -348,20 +350,21 @@ export function registerCareerTools(ctx, deps) {
 
   add(makeTool({
     name: 'career_job_search',
-    description: '检索岗位库：自然语言关键词 + 结构化筛选（公司/城市/状态/实习类型/技能/最低匹配分/截止日）。返回时说明检索范围与未覆盖渠道。',
+    description: '检索本地全库：多关键词 + 结构化筛选（公司/城市/状态/实习类型/技能/最低匹配分/截止日）。返回时说明检索范围与未覆盖渠道。',
     params: {
       query: S('关键词，如「AI 产品 北京」'),
       company: S('公司名过滤'), location: S('城市过滤'),
       status: SA('招聘状态过滤'), internshipType: SA('实习类型过滤'),
       skill: S('技能关键词'), minScore: N('最低匹配分'), deadlineBefore: S('截止日期早于 YYYY-MM-DD'),
-      limit: N('返回条数，默认 30'),
+      limit: N('返回条数，默认 30'),offset:N('分页偏移'),recruitType:SA('招聘批次/类型'),jdComplete:B('只看职责和要求两段齐全'),
     },
     handler: (args) => {
       const profile = repos.profile.getWithResume()
-      const rows = repos.jobs.listJobs({ ...args, limit: args.limit ?? 30 }, profile)
+      const page = repos.jobs.queryPage({ ...args, limit: args.limit ?? 30 })
+      const rows=page.items
       return {
         ok: true,
-        count: rows.length,
+        count: rows.length,total:page.total,limit:page.limit,offset:page.offset,
         scope: {
           searchedFields: ['岗位标题', '公司', '地点', 'JD 描述', '招聘要求'],
           sourcesCovered: '仅本地已入库岗位（来源见每条的 provenance）；未访问任何第三方招聘平台',
@@ -386,7 +389,7 @@ export function registerCareerTools(ctx, deps) {
     handler: (args) => {
       const job = repos.jobs.getJob(String(args.id))
       if (!job) throw new Error('岗位不存在')
-      return { ok: true, job: job, statusLabel: STATUS_LABEL[job.status] }
+      return {ok:true,...buildJob360(repos,String(args.id))}
     },
   }))
 
@@ -1342,6 +1345,7 @@ export function registerCareerTools(ctx, deps) {
       recruitType: S('campus/social/intern'), site: S('库外JD搜索平台：boss或51job，默认boss'),
     },
     handler: async (args) => {
+      const budget=new ResearchBudget({maxVisits:6,timeoutMs:90000})
       let job=args.jobId?repos.jobs.getJob(String(args.jobId)):null
       const company=str(args.company,120)??job?.company_name
       const title=str(args.title,200)??job?.title
@@ -1352,27 +1356,27 @@ export function registerCareerTools(ctx, deps) {
         if(!job.description && !job.requirements){
           const provider=resolveJdProvider({url:job.apply_url??job.url})
           if(provider){
-            const detail=await fetchJdDetail({provider,url:job.apply_url??job.url,postId:job.post_id,jobCode:job.job_code,dataDir:config.dataDir,timeoutMs:14000})
+            const detail=await budget.visit('补全目标JD',ctx=>fetchJdDetail({provider,url:job.apply_url??job.url,postId:job.post_id,jobCode:job.job_code,dataDir:config.dataDir,timeoutMs:Math.min(14000,ctx.timeoutMs),signal:ctx.signal}))
             if(detail.ok){repos.jobs.setJd(job.id,detail);job=repos.jobs.getJob(job.id)}
             else result.jdError=detail.error
           }
         }
         result.jd={available:Boolean(job.description||job.requirements),description:job.description,requirements:job.requirements,completeness:jdCompleteness(job),source:'岗位库/岗位详情',status:job.status,location:job.location,applyUrl:job.apply_url}
       }else{
-        const candidates=await captureSite({site:args.site==='51job'?'51job':'boss',keyword:[company,title].join(' '),recruitType:args.recruitType,dryRun:true,limit:5,fillJd:true,fillJdLimit:2},{config,repos,panel,logger})
+        const candidates=await captureSite({site:args.site==='51job'?'51job':'boss',keyword:[company,title].join(' '),recruitType:args.recruitType,dryRun:true,limit:5,fillJd:true,fillJdLimit:2},{config,repos,panel,logger,budget})
         result.jd={available:false,candidates:candidates.preview??[],search:candidates.search,error:candidates.error,note:'库外返回JD候选；未自动入库或把不同部门岗位当成同一岗位。'}
       }
       if(args.includeXhs!==false){
-        result.xhs=await captureSite({site:'xhs',keyword:str(args.keyword,120)??[company,title,'面经'].join(' '),dryRun:true,limit:5,bodyLimit:2,useOpenTab:args.useOpenTab},{config,repos,panel,logger})
+        result.xhs=await captureSite({site:'xhs',keyword:str(args.keyword,120)??[company,title,'面经'].join(' '),dryRun:true,limit:5,bodyLimit:2,useOpenTab:args.useOpenTab},{config,repos,panel,logger,budget})
       }
       if(args.includeOffershow!==false){
-        result.offershow=await captureSite({site:'offershow',keyword:company,dryRun:true,limit:8,fillJd:false,useOpenTab:args.useOpenTab},{config,repos,panel,logger})
+        result.offershow=await captureSite({site:'offershow',keyword:company,dryRun:true,limit:8,fillJd:false,useOpenTab:args.useOpenTab},{config,repos,panel,logger,budget})
         result.offershow.contentKind='recruitment-plan'
         result.offershow.salaryVerified=false
-        result.offershow.publicSalaryHighlights=await fetchOfferShowSalaryHighlights({dataDir:config.dataDir,company})
+        try {result.offershow.publicSalaryHighlights=await budget.visit('公开薪资摘要',ctx=>fetchOfferShowSalaryHighlights({dataDir:config.dataDir,company,signal:ctx.signal,timeoutMs:ctx.timeoutMs}))}catch(e){result.offershow.publicSalaryHighlights={ok:false,error:e.message,skipped:true}}
       }
       result.caveats=['论坛内容为用户自述，官方JD与在招状态需独立核实。','搜索仅覆盖当前返回页；无匹配不等于全站没有。','小红书图文可能只有标签，未做OCR的图片/视频不作为已取得面经正文。','OfferShow校招计划不等于薪资爆料，薪资未核实会明确标注。']
-      return result
+      return {...result,budget:budget.summary()}
     },
   }))
 
