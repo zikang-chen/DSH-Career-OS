@@ -15,6 +15,10 @@ D:\career_os\            ← 这个包本身就是 bundle
 └── data/                career.db · logs · backups · exports（运行时生成）
 ```
 
+## 最新使用讲解
+
+请先看 **[最新版使用指南](docs/QUICKSTART.md)**：包含岗位浏览、五站登录采集、知识库分类、图片OCR与Agent校对、岗位简历、投递冻结，以及真实可用范围和剩余限制。
+
 ## 立即使用
 
 1. 左侧边栏底部点 **🎯 求职面板**。
