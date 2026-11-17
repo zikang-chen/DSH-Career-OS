@@ -1,10 +1,63 @@
 // Application CRM: records, status timeline, board grouping and follow-up prompts.
 import { APPLICATION_LABEL, APPLICATION_STATUSES, RECRUIT_LABEL } from '../domain.js'
-import { arr, nowIso, num, str, toBool, uuid } from '../util.js'
+import { computeFunnel } from '../funnel.js'
+import { arr, nowIso, num, parseJson, str, toBool, uuid } from '../util.js'
+
+/**
+ * 冻结此刻的岗位 JD。
+ * 岗位行会被 sync 刷新、甚至被删，但「我当时投的是什么要求」必须留得住——
+ * 面试前一天想不起原始 JD 是很常见的事，而它决定了你该怎么准备。
+ */
+export function freezeJd({ job, jd, jdUrl, applyUrl, location, deadline } = {}) {
+  if (jd && String(jd).trim()) {
+    return {
+      title: job?.title ?? null,
+      company: job?.company_name ?? null,
+      source: 'user',
+      jdUrl: str(jdUrl, 1000),
+      text: String(jd).trim().slice(0, 20000),
+      capturedAt: nowIso(),
+    }
+  }
+  if (!job) return null
+  return {
+    title: job.title ?? null,
+    company: job.company_name ?? null,
+    source: 'job',
+    jobId: job.id,
+    location: location ?? job.location ?? null,
+    deadline: deadline ?? job.deadline ?? null,
+    applyUrl: applyUrl ?? job.apply_url ?? null,
+    recruitType: job.recruit_type ?? null,
+    description: str(job.description, 20000),
+    requirements: str(job.requirements, 20000),
+    skills: parseJson(job.skills, []),
+    capturedAt: nowIso(),
+  }
+}
 
 export function mapApplication(row) {
   if (!row) return null
-  return { ...row, archived: toBool(row.archived), statusLabel: APPLICATION_LABEL[row.status] ?? row.status }
+  return {
+    ...row,
+    archived: toBool(row.archived),
+    statusLabel: APPLICATION_LABEL[row.status] ?? row.status,
+    submittedJd: parseJson(row.submitted_jd, null),
+    submissionSnapshot: parseJson(row.submission_snapshot, null),
+  }
+}
+
+/** 提交材料的快照：哪版简历 + 哪些资料（真投了才写，没指定就诚实留空）。 */
+export function buildSubmissionSnapshot({ resumeVersion, documents = [], specified = false, note } = {}) {
+  return {
+    resumeVersionId: resumeVersion?.id ?? null,
+    resumeLabel: resumeVersion?.label ?? null,
+    resumeTargetJobId: resumeVersion?.target_job_id ?? null,
+    documents: documents.map((doc) => ({ id: doc.id, title: doc.title, category: doc.category })),
+    materialsSpecified: specified,
+    capturedAt: nowIso(),
+    note: note ?? (specified ? null : '创建投递时没有指定提交材料，故只记录了简历版本。'),
+  }
 }
 
 export class ApplicationRepo {
@@ -29,13 +82,31 @@ export class ApplicationRepo {
     const location = str(input.location, 200) ?? job?.location ?? null
     const deadline = str(input.deadline, 40) ?? job?.deadline ?? null
     const recruitType = str(input.recruitType, 40) ?? job?.recruit_type ?? null
+    // 证据链：冻结 JD，并记录这次提交用了什么材料。
+    const submittedJd = freezeJd({ job, jd: input.jd, jdUrl: input.jdUrl, applyUrl, location, deadline })
+    const resumeVersion = input.resumeVersionId
+      ? this.db.get('SELECT id, label, target_job_id FROM resume_version WHERE id = ?', [str(input.resumeVersionId, 60)]) ?? null
+      : null
+    const docIds = arr(input.docIds)
+    const documents = docIds.length
+      ? this.db.all(`SELECT id, title, category FROM personal_document WHERE id IN (${docIds.map(() => '?').join(',')})`, docIds)
+      : []
+    const submissionSnapshot = buildSubmissionSnapshot({
+      resumeVersion,
+      documents,
+      specified: docIds.length > 0,
+      note: input.snapshotNote,
+    })
     this.db.tx(() => {
-      this.db.run(`INSERT INTO application (id, job_id, company_name, job_title, url, apply_url, location, deadline, recruit_type, status, channel, resume_version_id, applied_at, next_action, next_action_at, notes, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      this.db.run(`INSERT INTO application (id, job_id, company_name, job_title, url, apply_url, location, deadline, recruit_type, status, channel, resume_version_id, applied_at, next_action, next_action_at, notes, created_at, updated_at, submitted_jd, submission_snapshot, jd_url)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [id, str(input.jobId, 60), companyName, jobTitle, str(input.url ?? jobUrl, 1000), applyUrl, location, deadline, recruitType, status,
           str(input.channel, 120), str(input.resumeVersionId, 60),
           str(input.appliedAt, 40) ?? (status === 'applied' ? at.slice(0, 10) : null),
-          str(input.nextAction, 500), str(input.nextActionAt, 40), str(input.notes, 8000), at, at])
+          str(input.nextAction, 500), str(input.nextActionAt, 40), str(input.notes, 8000), at, at,
+          submittedJd ? JSON.stringify(submittedJd) : null,
+          JSON.stringify(submissionSnapshot),
+          str(input.jdUrl, 1000)])
       this.db.run('INSERT INTO application_event (id, application_id, type, to_status, at, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
         [uuid(), id, 'status', status, at, '创建投递记录', at])
     })
@@ -190,5 +261,25 @@ export class ApplicationRepo {
     const rows = this.db.all('SELECT status, count(*) AS n FROM application WHERE archived = 0 GROUP BY status')
     const total = rows.reduce((a, r) => a + Number(r.n), 0)
     return { total, byStatus: Object.fromEntries(rows.map((r) => [r.status, Number(r.n)])) }
+  }
+
+  /** 阶段转化率：哪一关在漏人。基于状态历史，而不是只看当前状态。 */
+  funnel() {
+    const applications = this.db.all('SELECT * FROM application WHERE archived = 0')
+    const events = this.db.all('SELECT * FROM application_event')
+    return computeFunnel({ applications, events, now: nowIso() })
+  }
+
+  /** 同一公司近期是否投过（很多公司有 6 个月冷冻期）。 */
+  cooldownCheck({ companyName, months = 6 }) {
+    const since = new Date(Date.now() - months * 30 * 86400000).toISOString().slice(0, 10)
+    const rows = this.db.all(
+      `SELECT id, company_name, job_title, status, coalesce(applied_at, created_at) AS at
+       FROM application
+       WHERE archived = 0 AND company_name LIKE ? AND coalesce(applied_at, created_at) >= ?
+       ORDER BY at DESC`,
+      [`%${companyName}%`, since],
+    )
+    return { companyName, months, hits: rows, blocked: rows.length > 0 }
   }
 }

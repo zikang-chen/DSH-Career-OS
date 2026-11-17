@@ -963,6 +963,71 @@ function TrackerTab({ bootstrap, onChanged }) {
 
   const changeStatus = (id, status) => apiPost('/application/update', { id, status }).then(() => { load(); onChanged?.() }).catch((err) => setError(err.message))
 
+  // 漏斗 + 网申信息卡：复盘看漏斗，投递时用信息卡。
+  const [funnel, setFunnel] = useState(null)
+  const [card, setCard] = useState(null)
+  const [cardOpen, setCardOpen] = useState(false)
+  useEffect(() => {
+    apiGet('/funnel').then(setFunnel).catch(() => setFunnel(null))
+    apiGet('/apply-card').then(setCard).catch(() => setCard(null))
+  }, [data])
+
+  const copyCard = () => {
+    if (!card?.text) return
+    const done = () => setError(null)
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(card.text).then(done).catch(() => setError('复制失败：浏览器拒绝了剪贴板权限'))
+    } else {
+      setError('当前环境不支持自动复制，请展开后手动选中复制')
+    }
+  }
+
+  const funnelBlock = funnel && funnel.submitted > 0
+    ? h('div', { style: S.card },
+      h('div', { style: { ...S.row, justifyContent: 'space-between', alignItems: 'center' } },
+        h('div', { style: S.h2 }, '转化漏斗'),
+        h('div', { style: S.muted }, `已投 ${funnel.submitted} 条 · 在流程中 ${funnel.inPipeline} 条 · 已拒 ${funnel.rejected} 条`)),
+      h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 6, marginTop: 8 } },
+        funnel.stages.map((stage) => h('div', {
+          key: stage.key,
+          style: {
+            ...S.cardTight, minWidth: 96, textAlign: 'center',
+            borderColor: funnel.choke && funnel.choke.to === stage.label ? T.warn ?? T.error : T.border,
+          },
+        },
+        h('div', { style: { fontSize: 18, fontWeight: 700, color: T.text } }, stage.count),
+        h('div', { style: { ...S.muted, fontSize: 11 } }, stage.label),
+        h('div', { style: { ...S.mono, fontSize: 11, color: T.muted } },
+          stage.passRate === null ? '—' : `${stage.passRate}%`)))),
+      funnel.choke
+        ? h('div', { style: { ...S.muted, marginTop: 8 } },
+          `卡点：「${funnel.choke.from} → ${funnel.choke.to}」掉 ${funnel.choke.dropped} 条，通过率 ${funnel.choke.passRate ?? '—'}%。`)
+        : null,
+      funnel.stalled?.length
+        ? h('div', { style: { ...S.muted, marginTop: 4 } },
+          `停滞 ≥14 天：${funnel.stalled.slice(0, 3).map((s) => `${s.company}（${s.days} 天）`).join('、')}${funnel.stalled.length > 3 ? ` 等 ${funnel.stalled.length} 条` : ''}`)
+        : null,
+      h('div', { style: { ...S.muted, marginTop: 6, fontSize: 11 } }, funnel.caveat))
+    : null
+
+  const cardBlock = card
+    ? h('div', { style: S.card },
+      h('div', { style: { ...S.row, justifyContent: 'space-between', alignItems: 'center' } },
+        h('div', { style: S.h2 }, '网申信息卡'),
+        h('div', { style: S.row },
+          h(Chip, { tone: card.completeness.percent >= 90 ? 'success' : 'warn' },
+            `${card.completeness.filled}/${card.completeness.total} 字段`),
+          h(Btn, { kind: 'primary', onClick: copyCard }, '复制全部'),
+          h(Btn, { kind: 'ghost', onClick: () => setCardOpen(!cardOpen) }, cardOpen ? '收起' : '展开'))),
+      card.missing.length
+        ? h('div', { style: { ...S.muted, marginTop: 6 } },
+          `还缺 ${card.missing.length} 项：${card.missing.slice(0, 6).map((m) => m.label).join('、')}${card.missing.length > 6 ? ' 等' : ''}`)
+        : h('div', { style: { ...S.muted, marginTop: 6, color: T.success } }, '字段齐全，直接复制到网申页面即可。'),
+      cardOpen
+        ? h('div', { style: { ...S.mono, marginTop: 8, whiteSpace: 'pre-wrap', maxHeight: 320, overflow: 'auto', background: T.bg, padding: 10, borderRadius: 6 } }, card.text)
+        : null)
+    : null
+
   const columns = data?.applications
     ? ['saved', 'researching', 'resume_todo', 'ready', 'applied', 'assessment', 'written_test', 'interview_1', 'interview_2', 'final', 'hr', 'offer', 'rejected', 'closed', 'withdrawn']
     : []
@@ -1003,6 +1068,8 @@ function TrackerTab({ bootstrap, onChanged }) {
 
   return h('div', { style: S.col },
     error ? h('div', { style: { ...S.card, ...S.muted, color: T.error } }, error) : null,
+    funnelBlock,
+    cardBlock,
     h('div', { style: { ...S.row, justifyContent: 'space-between' } },
       h('div', { style: S.h1 }, '投递管理'),
       h('div', { style: S.row },

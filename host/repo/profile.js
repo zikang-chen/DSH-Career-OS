@@ -73,7 +73,9 @@ export class ProfileRepo {
   update(patch = {}) {
     const current = this.get()
     const columns = ['display_name', 'headline', 'school', 'degree', 'major', 'grad_year', 'availability_start',
-      'availability_end', 'weekly_days', 'remote_pref', 'salary_min']
+      'availability_end', 'weekly_days', 'remote_pref', 'salary_min',
+      // 网申信息卡要用的联系方式等字段（v9）
+      'phone', 'email', 'birth_date', 'gender', 'political_status', 'hometown', 'current_city', 'gpa', 'rank_text']
     const values = {}
     for (const col of columns) {
       const camel = col.replace(/_([a-z])/g, (_, c) => c.toUpperCase())

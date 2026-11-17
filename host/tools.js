@@ -11,6 +11,7 @@ import { compileTex, detectEngines, renderResumeTex, renderResumeText } from './
 import { KIND_LABEL, planTailor, sectionsFromSelection, suggestKindOrder } from './tailor.js'
 import { auditVault, planMerge } from './merge.js'
 import { DOC_LABEL, planDocumentSelection, proposeDocument, renderDocumentLines } from './documents.js'
+import { buildApplyCard, renderApplyCardText } from './applycard.js'
 import { extractResumeText, parseResume, proposalToProfilePatch } from './resume.js'
 import { parsePastedJob, suggestSocialQueries } from './sources.js'
 import { buildBrief, buildPlan, buildTimeline, seasonRuleSet } from './plan.js'
@@ -120,6 +121,12 @@ export function registerCareerTools(ctx, deps) {
       skills: { type: 'array', items: { type: 'object' }, description: '技能数组 [{name,level,years,verified}]' },
       preferences: { type: 'object', description: '偏好与权重 {weights:{qualification,experience,interest,logistics,growth,freshness}}' },
       onboarded: B('是否完成引导'),
+      // 网申信息卡要用的字段（v9）
+      phone: S('手机号（只存本机）'), email: S('邮箱'),
+      birthDate: S('出生日期 YYYY-MM-DD'), gender: S('性别'),
+      politicalStatus: S('政治面貌，如 共青团员/中共党员/群众'),
+      hometown: S('籍贯'), currentCity: S('现居城市'),
+      gpa: S('GPA 原文，如 3.72/4.0'), rankText: S('专业排名原文，如 4/71'),
     },
     handler: (args) => {
       const updated = repos.profile.update(args)
@@ -1537,13 +1544,78 @@ export function registerCareerTools(ctx, deps) {
   // ── applications ───────────────────────────────────────────────────────────
   add(makeTool({
     name: 'career_application_create',
-    description: '创建投递记录（状态默认 saved）。不会替你投递，只记录。',
+    description: '创建投递记录（状态默认 saved）。创建时会**冻结当时的 JD** 并记录提交材料快照，之后岗位被刷新或删除也不影响复盘。若同公司近期投过会给出冷冻期提醒。不会替你投递，只记录。',
     params: {
       jobId: S('岗位 id（推荐，会自动带公司/岗位名）'), companyName: S('公司名'), jobTitle: S('岗位名'),
       status: S(APPLICATION_STATUSES.join('|')), channel: S('投递渠道'), url: S('岗位链接'),
       resumeVersionId: S('使用的简历版本'), nextAction: S('下一步动作'), nextActionAt: S('下一步日期 YYYY-MM-DD'), notes: S('备注'),
+      jd: S('JD 原文（岗位库里没有时直接粘进来，会被冻结保存）'),
+      jdUrl: S('JD 原文链接'),
+      docIds: SA('这次一起提交的资料 id（来自个人资料库）'),
+      snapshotNote: S('材料快照备注'),
+      skipCooldownCheck: B('跳过同公司冷冻期检查'),
     },
-    handler: (args) => ({ ok: true, application: repos.applications.create(args) }),
+    handler: (args) => {
+      let cooldown = null
+      if (args.skipCooldownCheck !== true) {
+        const company = str(args.companyName, 200)
+          ?? (args.jobId ? repos.jobs.getJob(String(args.jobId))?.company_name : null)
+        if (company) cooldown = repos.applications.cooldownCheck({ companyName: company })
+      }
+      const application = repos.applications.create(args)
+      return {
+        ok: true,
+        application,
+        hasJd: Boolean(application?.submitted_jd),
+        materialsSpecified: Boolean(application?.submission_snapshot?.materialsSpecified),
+        cooldown: cooldown?.blocked
+          ? { warning: `近 ${cooldown.months} 个月内已投过「${cooldown.hits[0].company_name}」${cooldown.hits.length} 次，多数公司有 6 个月冷冻期，重复投递可能被直接筛掉。`, hits: cooldown.hits }
+          : null,
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_funnel',
+    description: '投递漏斗：按「达到过的最高阶段」统计 投递→测评/笔试→一面→二面→终面→offer 的到达人数与阶段通过率，指出卡在哪一关，并给出分渠道转化与停滞超 14 天的记录。复盘看这个，不是看投了多少家。',
+    params: {},
+    handler: () => {
+      const funnel = repos.applications.funnel()
+      return {
+        ok: true,
+        ...funnel,
+        readHint: funnel.choke
+          ? `流失最多的是「${funnel.choke.from} → ${funnel.choke.to}」：掉 ${funnel.choke.dropped} 条，通过率 ${funnel.choke.passRate ?? '—'}%。这一跳对应的能力缺口最该优先补。`
+          : '还没有跨阶段的投递记录，等有面试结果再看。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_apply_card',
+    description: '生成网申信息卡：把投递表单要填的字段（姓名/证件/学历/在读起止/排名/语言成绩/求职意向/附件）按顺序摊平，可直接复制粘贴到招聘系统，并列出本机缺哪些字段。只整理已有事实，不生成新内容。',
+    params: {
+      includeEmpty: B('是否也列出空字段（默认 true，方便知道去补什么）'),
+      format: S('text 纯文本 / json 结构化，默认 text'),
+    },
+    handler: (args) => {
+      const card = buildApplyCard({
+        profile: repos.profile.get(),
+        documents: repos.profile.listDocuments({}),
+        experiences: repos.profile.listExperiences(),
+        versions: repos.profile.listResumes(),
+      })
+      const text = renderApplyCardText(card)
+      return {
+        ok: true,
+        ...card,
+        text,
+        format: args.format === 'json' ? 'json' : 'text',
+        next: card.missing.length
+          ? `先补这 ${card.missing.length} 项：${card.missing.slice(0, 6).map((m) => m.label).join('、')}${card.missing.length > 6 ? ' 等' : ''}（career_profile_update 或上传到资料库）`
+          : '字段齐了，直接复制 text 到网申页面。',
+      }
+    },
   }))
 
   add(makeTool({

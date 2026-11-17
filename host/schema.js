@@ -2,7 +2,7 @@
 // and is recorded in `schema_migrations`. Never edit an applied migration — append a
 // new one instead, so existing databases keep their history and user data.
 
-export const SCHEMA_VERSION = 8
+export const SCHEMA_VERSION = 9
 
 /**
  * @type {Array<{version:number,name:string,sql:string}>}
@@ -621,6 +621,29 @@ CREATE TABLE personal_document (
 );
 CREATE INDEX idx_document_category ON personal_document(category);
 CREATE INDEX idx_document_issued ON personal_document(issued_at);
+`,
+  },
+  {
+    version: 9,
+    name: 'apply-card-and-submission-proof',
+    // 两件事：
+    //  1) 网申信息卡需要联系方式等字段（之前 profile 只存了学历/意向，没有电话邮箱）；
+    //  2) 投递必须留证据：冻结当时的 JD，并记录提交了哪版简历、哪些资料。
+    //     岗位下架或 sync 刷新之后，投递记录仍然能回答「我当时投的是什么」。
+    sql: `
+ALTER TABLE user_profile ADD COLUMN phone TEXT;
+ALTER TABLE user_profile ADD COLUMN email TEXT;
+ALTER TABLE user_profile ADD COLUMN birth_date TEXT;
+ALTER TABLE user_profile ADD COLUMN gender TEXT;
+ALTER TABLE user_profile ADD COLUMN political_status TEXT;
+ALTER TABLE user_profile ADD COLUMN hometown TEXT;
+ALTER TABLE user_profile ADD COLUMN current_city TEXT;
+ALTER TABLE user_profile ADD COLUMN gpa TEXT;
+ALTER TABLE user_profile ADD COLUMN rank_text TEXT;
+
+ALTER TABLE application ADD COLUMN submitted_jd TEXT;
+ALTER TABLE application ADD COLUMN submission_snapshot TEXT;
+ALTER TABLE application ADD COLUMN jd_url TEXT;
 `,
   },
 ]

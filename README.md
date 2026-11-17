@@ -67,10 +67,26 @@ D:\career_os\            ← 这个包本身就是 bundle
 >
 > 反向验证：`career_jobs_crawl` 抓 Lever 演示看板，返回 **10 条真实岗位**（标题/地点/投递地址齐全）。
 
+## 投递管理：要证据链，不要状态标签
+
+投递记录不只是「投了哪家」，而是**可复盘的凭据**：
+
+- **JD 快照** —— `career_application_create` 会把当时的 JD 冻结进记录。岗位被 sync 刷新或删除后，
+  面试前一天仍能看到「我当时投的是什么要求」。
+- **材料快照** —— 记录这次提交用了哪版简历、附了哪些资料（`docIds`），没指定就诚实标注「未指定」。
+- **冷冻期提醒** —— 同公司 6 个月内重复投递会直接告警（多数公司有冷冻期，重复投递会被筛掉）。
+- **转化漏斗** —— `career_funnel` 按「达到过的最高阶段」统计 投递→测评/笔试→一面→二面→终面→Offer，
+  给出阶段通过率、卡点、分渠道转化、停滞 ≥14 天的记录。
+  复盘要看的是**哪一关在漏人**，不是投了多少家；
+  样本 <10 条会明确提示「转化率不稳定，先攒样本」。
+- **网申信息卡** —— `career_apply_card` 把投递表单要填的字段按顺序摊平（姓名/证件/学历/在读起止/排名/
+  语言成绩/求职意向/附件），一键复制到招聘系统；**缺的字段如实标空**，并告诉你去哪补，不代填。
+
 ## 设计原则（对应实现）
 
 - **Local first** —— SQLite 在本机；简历原文与联系方式不出机器。
 - **Source first** —— 每条岗位事实都有 `job_source` 行（类型/链接/时间/摘录/可信度）。
+- **Evidence chain** —— 投递也要有原始凭证：冻结 JD + 材料快照，岗位下架后判断仍可回放。
 - **Verification first** —— 第三方线索只能把 `UNKNOWN` 升为 `UNVERIFIED`；`status_verified_at` 只由官方证据刷新；超期自动 `STALE`。
 - **Graceful degradation** —— 抓不到的来源在「数据源健康」里明确标记，并给出手动导入与搜索入口，绝不编造。
 - **Human in the loop** —— 简历解析是"提案"，确认后才入库；删除数据需两步 token。
@@ -88,14 +104,16 @@ D:\career_os\            ← 这个包本身就是 bundle
 ## 开发
 
 ```powershell
-node --test tests\core.test.mjs   # 28 个测试
-node scripts\build-client.mjs     # 改过 client/index.cjs 后重新生成 bundle
+node --test tests\core.test.mjs      # 单个套件
+node --test tests\                   # 全部 133 个测试（9 个套件）
+node scripts\build-client.mjs        # 改过 client/index.cjs 后重新生成 bundle
+node scripts\setup-runtime.mjs       # 装 PDF 解析依赖到项目内 runtime/pylib
 ```
 
 改 Host 代码后重载插件：`plugin_manager set_plugin enabled=false/true target=include:dsh-career`。
 
 ## 现状
 
-已安装并运行（schema v4 / ftsMode `trigram` / 36 工具 / 面板已进入 Web boot graph）。
-面板视觉尚未做浏览器内验证；库内有示例数据，正式使用前请在「设置」清除。
-详见 [docs/acceptance-report.md](docs/acceptance-report.md)。
+schema **v9** / ftsMode `trigram` / **67 工具** / 9 个测试套件 133 个用例全绿 / 面板已进入 Web boot graph。
+`data/` 与 `runtime/` 不入库（含真实简历与联系方式）；新机器克隆后跑一次 `scripts/setup-runtime.mjs` 即可。
+详见 [docs/acceptance-report.md](docs/acceptance-report.md) 与 [docs/environment.md](docs/environment.md)。

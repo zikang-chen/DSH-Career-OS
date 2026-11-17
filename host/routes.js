@@ -13,6 +13,7 @@ import { installPdfLibs, runtimeHealth } from './runtime.js'
 import { compileTex, detectEngines, renderResumeTex, renderResumeText } from './latex.js'
 import { KIND_LABEL, planTailor, sectionsFromSelection } from './tailor.js'
 import { DOC_LABEL, proposeDocument } from './documents.js'
+import { buildApplyCard, renderApplyCardText } from './applycard.js'
 import { buildBrief, buildPlan } from './plan.js'
 import { parsePastedJob } from './sources.js'
 import { sha1ish } from './util.js'
@@ -813,6 +814,19 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
   })
 
   route('POST', '/document/delete', async ({ body }) => ({ ok: true, deleted: repos.profile.deleteDocument(String(body.id ?? '')) }))
+
+  // ── 网申信息卡 / 漏斗 ─────────────────────────────────────────────────────
+  route('GET', '/apply-card', () => {
+    const card = buildApplyCard({
+      profile: repos.profile.get(),
+      documents: repos.profile.listDocuments({}),
+      experiences: repos.profile.listExperiences(),
+      versions: repos.profile.listResumes(),
+    })
+    return { ok: true, ...card, text: renderApplyCardText(card) }
+  })
+
+  route('GET', '/funnel', () => ({ ok: true, ...repos.applications.funnel() }))
 
   // ── SSE ────────────────────────────────────────────────────────────────────
   route('GET', '/events', ({ req, res }) => {
