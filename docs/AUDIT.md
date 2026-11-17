@@ -70,6 +70,25 @@
 Client 曾一次拉 120 条、`listJobs` 只有 `LIMIT` 没 `OFFSET`。**已加 `offset`**（repo + `/jobs` 路由），
 并补了「翻页不重复」的测试。
 
+### P2-8 抓取来的岗位被标成 OPEN（语义偏差）✅ 本日已修
+
+`career_browser_capture` / `career_jobs_from_curl` 的 `official` 默认是 `true`，于是「抓一次接口响应」
+就把岗位置 OPEN，但工具自己的说明写的是 UNVERIFIED——**说明与行为矛盾，违反「只有官方证据能 OPEN」**。
+
+已改为：这两个来源**默认 `official:false` → UNVERIFIED**，只有显式传 `official:true`
+或后续 `career_job_verify` 才升 OPEN。新增 `tests/status.test.mjs` 覆盖两种情况。
+（历史 28 条是旧默认产生的 OPEN，未强行回滚；需要时重抓或用 `career_job_verify`。）
+
+### P3-9 响应冗余 ✅ 本日已修
+
+workflow 工具此前 `flat(envelope(x), x)` 把 `data` 和扁平字段各输出一份。改为只返回 `envelope`，
+`data` 内即结果，减少 token 浪费（老工具不动）。
+
+### P4 体验 ✅ 本日已修
+
+Dashboard「推荐机会」改为调用 `/match/rank` 真实匹配排序；岗位卡把
+「匹配度 / 证据等级 / 招聘状态 / 核验时间」四要素分开显示；投递漏斗增加「分渠道转化」。
+
 ### ~~P1-6 FTS 没被使用~~ —— **本条审计有误，特此更正**
 
 `repo/jobs.js` 的 `searchJobIds()` **已经走 FTS**：`db.ftsMode === 'trigram'` 且查询 ≥3 字时用

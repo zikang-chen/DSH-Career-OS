@@ -11,7 +11,7 @@ import { probePortals, resolvePortal } from './portal.js'
 import { fetchJdDetail, resolveJdProvider } from './jd.js'
 import { checkResumeQuality } from './quality.js'
 import { findJobsForMe, prepResumeForJob, summarizeApplications } from './workflows.js'
-import { envelope, flat } from './envelope.js'
+import { envelope } from './envelope.js'
 import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
@@ -602,7 +602,7 @@ export function registerCareerTools(ctx, deps) {
       body: S('手填时的请求体（POST 查询接口常用 JSON）'),
       company: S('公司名（缺省从响应或你给的地址推断）'),
       recruitType: S('autumn_campus|spring_campus|summer|daily|other'),
-      official: B('是否官方来源，默认 true'),
+      official: B('是否标记为官方核验（默认 false）。false 时写 UNVERIFIED，不会假扮「官方在招」'),
       dryRun: B('只预览不写库，默认 false'),
       limit: N('最多导入多少条，默认 200'),
     },
@@ -709,9 +709,11 @@ export function registerCareerTools(ctx, deps) {
       const imported = repos.jobs.importPostings(withCompany, {
         company,
         pageUrl: sourceUrl,
-        official: args.official !== false,
+        // 用户重放的接口响应默认不是「官方核验」——一次重放≠官网页面确认。
+        // 只有显式 official:true 才升 OPEN；否则一律 UNVERIFIED，可后续 career_job_verify 升级。
+        official: args.official === true,
         recruitType,
-        sourceName: args.official === false ? '用户重放的接口响应（非官方）' : '用户重放的接口响应（官方站点）',
+        sourceName: args.official === true ? '用户重放的接口响应（标记为官方）' : '用户重放的接口响应（未核验）',
       })
       panel.publish({ kind: 'jobs' })
       return {
@@ -757,7 +759,7 @@ export function registerCareerTools(ctx, deps) {
       patterns: SA('判断「哪个响应像岗位列表」的关键词，默认 job/post/position/search/campus/recruit'),
       company: S('公司名（缺省从页面推断）'),
       recruitType: S('autumn_campus|spring_campus|summer|daily|other'),
-      official: B('是否官方来源，默认 true'),
+      official: B('是否标记为官方核验（默认 false）。false 时写 UNVERIFIED，不会假扮「官方在招」'),
       dryRun: B('只预览不写库，默认 false'),
       limit: N('最多导入多少条，默认 200'),
       timeoutMs: N('等待页面加载与请求的毫秒数，默认 25000'),
@@ -833,9 +835,10 @@ export function registerCareerTools(ctx, deps) {
       const imported = repos.jobs.importPostings(withCompany, {
         company: companyName,
         pageUrl: sourceUrl,
-        official: args.official !== false,
+        // 自动捕获 ≠ 官方核验：默认 UNVERIFIED，避免「抓了一次就当官方在招」误导。
+        official: args.official === true,
         recruitType: str(args.recruitType, 40) ?? null,
-        sourceName: '专用浏览器自动捕获（用户登录态）',
+        sourceName: args.official === true ? '专用浏览器捕获（标记为官方）' : '专用浏览器捕获（未核验）',
       })
       panel.publish({ kind: 'jobs' })
 
@@ -1194,11 +1197,11 @@ export function registerCareerTools(ctx, deps) {
         status: arr(args.status).length ? arr(args.status) : undefined,
       }, profile)
       const result = findJobsForMe({ profile, jobs, limit: Number(args.limit ?? 10) })
-      return flat(envelope(result, {
+      return envelope(result, {
         warnings: result.caveats ?? [],
         nextActions: result.ok === false ? ['先填写画像'] : (result.count ? ['对选中的岗位跑 career_prep_resume'] : ['先去岗位雷达抓岗位']),
         meta: { tool: 'career_find_jobs', considered: result.considered ?? 0 },
-      }), result)
+      })
     },
   }))
 
@@ -1210,11 +1213,11 @@ export function registerCareerTools(ctx, deps) {
       const applications = repos.applications.list({ limit: 1000, includeArchived: false })
       const events = repos.db.all('SELECT * FROM application_event')
       const result = summarizeApplications({ applications, events })
-      return flat(envelope(result, {
+      return envelope(result, {
         warnings: result.funnel?.caveat ? [result.funnel.caveat] : [],
         nextActions: result.needsAction?.length ? ['优先处理 needsAction 里的记录'] : [],
         meta: { tool: 'career_my_progress', total: result.total },
-      }), result)
+      })
     },
   }))
 
@@ -1238,11 +1241,11 @@ export function registerCareerTools(ctx, deps) {
         maxEntries: Number(args.maxEntries ?? 6),
         bulletsPerEntry: Number(args.bulletsPerEntry ?? 3),
       })
-      return flat(envelope(result, {
+      return envelope(result, {
         warnings: [result.caveat, ...(result.quality?.issues ?? []).filter((i) => i.level === 'error').map((i) => i.message)].filter(Boolean),
         nextActions: ['确认挑选结果后调用 career_resume_build 出稿'],
         meta: { tool: 'career_prep_resume', jdLevel: result.jdCompleteness?.level ?? null },
-      }), result)
+      })
     },
   }))
 

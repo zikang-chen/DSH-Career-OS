@@ -120,7 +120,7 @@ function useApi(path, deps) {
 
 // 构建标记：面板标题里显示，用于确认浏览器加载的是不是最新 bundle。
 // 改了 client 之后手动改这个字符串，方便一眼判断有没有缓存。
-const CLIENT_BUILD = 'v2026-11-17.3'
+const CLIENT_BUILD = 'v2026-11-17.4'
 
 
 function Chip({ tone, children }) {
@@ -273,6 +273,13 @@ function useBackend() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 function OverviewTab({ bootstrap, onNavigate, onRefresh }) {
+  // 推荐机会：调后端的匹配排序（硬条件过滤 + 六维加权），不是按入库时间凑数
+  const [recs, setRecs] = useState(null)
+  useEffect(() => {
+    let alive = true
+    apiPost('/match/rank', {}).then((r) => { if (alive) setRecs(r) }).catch(() => { if (alive) setRecs(null) })
+    return () => { alive = false }
+  }, [])
   if (!bootstrap) return h(Loading)
   // `/bootstrap` nests jobStats / applicationStats / unreadNotifications inside
   // `digest`, and any of them can be missing on a partial payload. Read defensively:
@@ -320,6 +327,24 @@ function OverviewTab({ bootstrap, onNavigate, onRefresh }) {
         h(Btn, { onClick: () => onNavigate('resume') }, '改简历'),
         h(Btn, { onClick: () => onNavigate('plan') }, '看计划'),
         h(Btn, { kind: 'ghost', onClick: () => onNavigate('settings') }, '数据源与监控'))),
+
+    // 推荐机会：按匹配度排序，四要素分开显示，不把「匹配度」和「在招状态」混为一谈
+    h('div', { style: S.card },
+      h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+        h('div', { style: S.h2 }, '推荐机会（按匹配度）'),
+        h(Btn, { kind: 'ghost', onClick: () => onNavigate('radar') }, '去岗位雷达')),
+      h('div', { style: { ...S.muted, marginTop: 4 } },
+        '匹配度 = 与你的偏好的契合度，不是录用概率；在招状态与核验时间是另一回事，分开看。'),
+      recs?.top?.length
+        ? h('div', { style: S.col },
+          recs.top.filter((r) => r.band !== 'hard_mismatch').slice(0, 5).map((r) => h('div', {
+            key: r.id, style: { ...S.cardTight, cursor: 'pointer' }, onClick: () => onNavigate('radar'),
+          },
+            h('div', { style: { ...S.row, justifyContent: 'space-between', gap: 8 } },
+              h('span', { style: { ...S.body, fontWeight: 600 } }, `${r.company} · ${r.title}`),
+              h(Chip, { tone: r.score >= 80 ? 'success' : r.score >= 65 ? 'accent' : undefined }, `匹配 ${r.score}`)),
+            h('div', { style: { ...S.muted, fontSize: 11 } }, r.bandLabel || r.band))))
+        : h('div', { style: S.muted }, recs ? '还没有可推荐的岗位（先抓岗位或补画像）。' : '正在计算匹配…')),
 
     h('div', { style: S.grid(300) },
       h('div', { style: S.card },
@@ -632,7 +657,14 @@ function RadarTab({ focusCode, onChanged }) {
           h('div', { style: { ...S.row, justifyContent: 'space-between', gap: 8 } },
             h('div', { style: { ...S.col, gap: 2, minWidth: 0 } },
               h('div', { style: { ...S.body, fontWeight: 600 } }, `${job.company} · ${job.title}`),
-              h('div', { style: { ...S.muted } }, [job.location || '地点未知', job.department, `截止 ${fmtDate(job.deadline)}`].filter(Boolean).join(' · '))),
+              h('div', { style: { ...S.muted } }, [job.location || '地点未知', job.department, `截止 ${fmtDate(job.deadline)}`].filter(Boolean).join(' · ')),
+              h('div', { style: { ...S.muted, fontSize: 11 } },
+                [
+                  `匹配 ${job.matchScore ?? '未评分'}`,
+                  `证据 ${job.confidence ?? job.confidence_level ?? '—'}`,
+                  `状态 ${job.statusLabel ?? job.status}`,
+                  `核验 ${relTime(job.statusVerifiedAt ?? job.status_verified_at) || '从未'}`,
+                ].join(' · '))),
             h('div', { style: { ...S.row, gap: 6 } },
               h(Chip, { tone: statusTone(job.status) }, job.statusLabel),
               h(Score, { value: job.matchScore }))),
@@ -1170,6 +1202,13 @@ function TrackerTab({ bootstrap, onChanged }) {
       funnel.stalled?.length
         ? h('div', { style: { ...S.muted, marginTop: 4 } },
           `停滞 ≥14 天：${funnel.stalled.slice(0, 3).map((s) => `${s.company}（${s.days} 天）`).join('、')}${funnel.stalled.length > 3 ? ` 等 ${funnel.stalled.length} 条` : ''}`)
+        : null,
+      funnel.byChannel?.length
+        ? h('div', { style: { ...S.cardTight, marginTop: 8 } },
+          h('div', { style: { ...S.muted, fontWeight: 600, fontSize: 11.5 } }, '分渠道转化'),
+          funnel.byChannel.map((c) => h('div', { key: c.channel, style: { ...S.row, justifyContent: 'space-between', ...S.muted, fontSize: 11.5 } },
+            h('span', null, c.channel),
+            h('span', null, `投 ${c.submitted} · 面试 ${c.interviews}（${c.interviewRate ?? '—'}%）· offer ${c.offers}`))))
         : null,
       h('div', { style: { ...S.muted, marginTop: 6, fontSize: 11 } }, funnel.caveat))
     : null
