@@ -296,135 +296,151 @@ function useBackend() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 function OverviewTab({ bootstrap, onNavigate, onRefresh }) {
-  // 推荐机会：调后端的匹配排序（硬条件过滤 + 六维加权），不是按入库时间凑数
-  const [recs, setRecs] = useState(null)
-  useEffect(() => {
-    let alive = true
-    apiPost('/match/rank', {}).then((r) => { if (alive) setRecs(r) }).catch(() => { if (alive) setRecs(null) })
-    return () => { alive = false }
-  }, [])
+  // 推荐由 bootstrap 确定：首页只读，不自动请求匹配重算。
+  const [pending, setPending] = useState({})
+  const [handled, setHandled] = useState({})
+  const [feedback, setFeedback] = useState(null)
+  const saveTask = async (id, action) => {
+    if (!id || pending[id]) return
+    setPending((s) => ({ ...s, [id]: true }))
+    setFeedback(null)
+    try {
+      // snooze 默认明天，由后端决定日期和时区。
+      await apiPost('/today/task', { id, action })
+      setHandled((s) => ({ ...s, [id]: true }))
+      setFeedback({ ok: true, text: action === 'done' ? '已完成，记录已保存。' : action === 'snooze' ? '已推迟到明天。' : '已忽略此项。' })
+    } catch {
+      setFeedback({ ok: false, text: '暂时无法保存，请稍后重试；此项仍保留在列表中。' })
+      return
+    } finally {
+      setPending((s) => ({ ...s, [id]: false }))
+    }
+    // 刷新失败不冒充保存失败，已确认的任务状态仍保留。
+    if (onRefresh) {
+      try { await onRefresh() } catch { setFeedback({ ok: false, text: '操作已保存，但工作台刷新失败，请稍后刷新。' }) }
+    }
+  }
   if (!bootstrap) return h(Loading)
-  // `/bootstrap` nests jobStats / applicationStats / unreadNotifications inside
-  // `digest`, and any of them can be missing on a partial payload. Read defensively:
-  // an undefined read here used to throw and take the whole panel down.
-  const dig = bootstrap.digest ?? {}
-  const jobStats = dig.jobStats ?? {}
-  const applicationStats = dig.applicationStats ?? {}
-  const closing = dig.closing ?? []
-  const newlyFound = dig.newlyFound ?? []
-  const follow = dig.followUps ?? {}
-  const completeness = bootstrap.completeness ?? { checks: [], done: 0, total: 0, percent: 0 }
-  const checks = completeness.checks ?? []
-  const done = completeness.done ?? 0
-  const total = completeness.total ?? 0
-  const percent = completeness.percent ?? 0
-  const notifications = bootstrap.notifications ?? []
+  const list = (value) => Array.isArray(value) ? value : []
+  const text = (value) => typeof value === 'string' ? value.replace(/career_[a-z_]+/gi, '相关功能') : ''
+  const number = (value) => typeof value === 'number' && Number.isFinite(value) ? String(value) : '—'
+  const today = bootstrap.today ?? {}
+  const profile = today.profile ?? {}
+  const health = today.health ?? {}
+  const coverage = today.coverage ?? {}
+  const priorities = list(today.priorities).filter((item) => item && !handled[item.id]).slice(0, 5)
+  const recommendations = list(today.recommendations).filter(Boolean).slice(0, 5)
+  const pipeline = list(today.pipeline).filter(Boolean)
+  const changes = list(today.changes).filter(Boolean)
   const status = bootstrap.status ?? {}
   const db = status.db ?? {}
-  const activeResume = bootstrap.activeResume ?? null
-  const focus = bootstrap.focus ?? null
-  const cards = [
-    { label: '在库岗位', value: jobStats.total ?? 0, hint: '只统计本机数据库' },
-    { label: '官方确认在招', value: (jobStats.byStatus ?? {}).OPEN ?? 0, hint: '需近期核验过' },
-    { label: '待核验', value: (jobStats.byStatus ?? {}).UNVERIFIED ?? 0, hint: '来自第三方线索' },
-    { label: '数据过期', value: (jobStats.byStatus ?? {}).STALE ?? 0, hint: '超期需重新核验' },
-    { label: '投递记录', value: applicationStats.total ?? 0, hint: '含全部阶段' },
-    { label: '未读提醒', value: dig.unreadNotifications ?? 0, hint: '来自监控规则' },
-  ]
-  return h('div', { style: S.col },
-    focus && focus.note ? h('div', { style: { ...S.cardTight, borderColor: T.accent, background: 'rgba(37,99,235,0.06)' } },
-      h('div', { style: { ...S.body, fontWeight: 550 } }, `Agent 提示：${focus.note}`),
-      focus.code ? h('div', { style: S.mono }, `聚焦对象 ${focus.code}`) : null) : null,
+  const checks = list(bootstrap.completeness?.checks)
+  const errors = bootstrap.errors ?? bootstrap._errors ?? bootstrap.error
+  const hasErrors = Array.isArray(errors) ? errors.length > 0 : errors && (typeof errors !== 'object' || Object.keys(errors).length > 0)
+  const profileConfirmation = profile.profileConfirmation
+  const confirmationText = typeof profileConfirmation === 'string' ? text(profileConfirmation)
+    : profileConfirmation === true ? '画像已确认' : profileConfirmation === false ? '画像待确认'
+      : text(profileConfirmation?.label || profileConfirmation?.message || profileConfirmation?.status)
+  const wrapRow = { ...S.row, flexWrap: 'wrap', gap: 8 }
+  const section = { ...S.col, gap: 12, minWidth: 0 }
+  const itemStyle = { padding: '12px 0', borderTop: `1px solid ${T.border}`, minWidth: 0 }
+  const entryActions = () => h('div', { style: wrapRow },
+    h(Btn, { kind: 'primary', onClick: () => onNavigate('radar') }, '找岗位'),
+    h(Btn, { onClick: () => onNavigate('resume') }, '补画像'),
+    h(Btn, { kind: 'ghost', onClick: () => onNavigate('company') }, '看公司情报'))
 
-    h('div', { style: S.grid(170) }, cards.map((c) => h('div', { key: c.label, style: S.card },
-      h('div', { style: { ...S.muted, fontSize: 11.5 } }, c.label),
-      h('div', { style: { fontSize: 22, fontWeight: 700, color: T.text, margin: '2px 0' } }, String(c.value ?? 0)),
-      h('div', { style: { ...S.muted, fontSize: 11 } }, c.hint)))),
+  return h('div', { style: { ...S.col, gap: 22 } },
+    h('header', { style: section },
+      h('div', { style: { ...wrapRow, justifyContent: 'space-between' } },
+        h('div', null,
+          h('h1', { style: S.h1 }, '今日工作台'),
+          h('div', { style: { ...S.muted, marginTop: 4 } }, '先处理要紧的事，再推进值得尝试的机会。')),
+        h(Btn, { kind: 'ghost', onClick: onRefresh }, '刷新')),
+      h('div', { style: { ...S.cardTight, ...wrapRow, justifyContent: 'space-between' } },
+        h('div', { style: { ...S.col, gap: 3, flex: '1 1 230px', minWidth: 0 } },
+          h('div', { style: { ...S.body, fontWeight: 600, overflowWrap: 'anywhere' } }, text(profile.headline) || '先明确你的求职目标'),
+          h('div', { style: S.muted }, [list(profile.targetRoles).map(text).filter(Boolean).join(' / '), list(profile.cities).map(text).filter(Boolean).join(' / '), profile.gradYear ? `${profile.gradYear} 届` : ''].filter(Boolean).join(' · ') || '目标方向、城市和毕业年份尚未提供。'),
+          confirmationText ? h('div', { style: S.muted }, confirmationText) : null),
+        h(Btn, { onClick: () => onNavigate('resume') }, '调整目标'))),
 
-    // 行动入口：首页不是统计报表，每个按钮都要能立刻去做事
-    h('div', { style: S.card },
-      h('div', { style: S.h2 }, '开始做事'),
-      h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 8 } },
-        h(Btn, { kind: 'primary', onClick: () => onNavigate('radar') }, '找岗位'),
-        h(Btn, { onClick: () => onNavigate('tracker') }, '看投递'),
-        h(Btn, { onClick: () => onNavigate('studio') }, '准备简历'),
-        h(Btn, { onClick: () => onNavigate('plan') }, '看计划'),
-        h(Btn, { kind: 'ghost', onClick: () => onNavigate('settings') }, '数据源与监控'))),
+    bootstrap.focus?.note ? h('div', { style: { ...S.muted, borderLeft: `3px solid ${T.accent}`, paddingLeft: 10 } }, text(bootstrap.focus.note)) : null,
+    hasErrors ? h('div', { role: 'alert', style: { ...S.cardTight, borderColor: T.warn } },
+      h('div', { style: S.body }, '部分工作台数据暂未加载，以下内容可能不完整。'),
+      h('div', { style: { ...S.muted, marginTop: 4 } }, '可刷新重试；已加载的内容仍可使用。'),
+      h(Btn, { kind: 'ghost', onClick: onRefresh }, '重试加载')) : null,
+    feedback ? h('div', { role: feedback.ok ? 'status' : 'alert', style: { ...S.muted, color: feedback.ok ? T.success : T.error } }, feedback.text) : null,
 
-    // 推荐机会：按匹配度排序，四要素分开显示，不把「匹配度」和「在招状态」混为一谈
-    h('div', { style: S.card },
-      h('div', { style: { ...S.row, justifyContent: 'space-between' } },
-        h('div', { style: S.h2 }, '推荐机会（按匹配度）'),
-        h(Btn, { kind: 'ghost', onClick: () => onNavigate('radar') }, '去岗位雷达')),
-      h('div', { style: { ...S.muted, marginTop: 4 } },
-        '匹配度 = 与你的偏好的契合度，不是录用概率；在招状态与核验时间是另一回事，分开看。'),
-      recs?.top?.length
-        ? h('div', { style: S.col },
-          recs.top.filter((r) => r.band !== 'hard_mismatch').slice(0, 5).map((r) => h('div', {
-            key: r.id, style: { ...S.cardTight, cursor: 'pointer' }, onClick: () => onNavigate('radar'),
-          },
-            h('div', { style: { ...S.row, justifyContent: 'space-between', gap: 8 } },
-              h('span', { style: { ...S.body, fontWeight: 600 } }, `${r.company} · ${r.title}`),
-              h(Chip, { tone: r.score >= 80 ? 'success' : r.score >= 65 ? 'accent' : undefined }, `匹配 ${r.score}`)),
-            h('div', { style: { ...S.muted, fontSize: 11 } }, r.bandLabel || r.band))))
-        : h('div', { style: S.muted }, recs ? '还没有可推荐的岗位（先抓岗位或补画像）。' : '正在计算匹配…')),
+    h('section', { style: section },
+      h('div', { style: { ...wrapRow, justifyContent: 'space-between' } },
+        h('h2', { style: S.h2 }, '优先处理'),
+        h('span', { style: S.muted }, '最多 5 项 · 按紧急程度排序')),
+      priorities.length ? h('div', null, priorities.map((item, index) => h('article', { key: item.id || index, style: itemStyle },
+        h('div', { style: { ...wrapRow, justifyContent: 'space-between', alignItems: 'flex-start' } },
+          h('div', { style: { ...S.col, gap: 4, flex: '1 1 240px', minWidth: 0 } },
+            h('div', { style: { ...S.body, fontWeight: 600, overflowWrap: 'anywhere' } }, text(item.title) || '待处理事项'),
+            item.reason ? h('div', { style: S.muted }, text(item.reason)) : null,
+            h('div', { style: S.muted }, [text(item.company), text(item.jobTitle), item.dueAt ? `到期 ${text(item.dueAt)}` : ''].filter(Boolean).join(' · '))),
+          item.action?.tab ? h(Btn, { kind: index === 0 ? 'primary' : undefined, onClick: () => onNavigate(item.action.tab, item.action.code) }, text(item.action.label) || '去处理') : null),
+        h('div', { style: { ...wrapRow, marginTop: 8 } },
+          h(Btn, { kind: 'ghost', disabled: !item.id || !!pending[item.id], onClick: () => saveTask(item.id, 'done') }, pending[item.id] ? '保存中…' : '完成'),
+          h(Btn, { kind: 'ghost', disabled: !item.id || !!pending[item.id], onClick: () => saveTask(item.id, 'snooze') }, '明天再看'),
+          h(Btn, { kind: 'ghost', disabled: !item.id || !!pending[item.id], onClick: () => saveTask(item.id, 'ignore') }, '忽略')))))
+        : h('div', { style: section }, h('div', { style: S.muted }, bootstrap.today ? '暂无待处理的优先事项。可以继续寻找机会，或检查目标是否完整。' : '今日任务暂未提供。你仍可从岗位、画像或公司情报开始。'), entryActions())),
 
-    h('div', { style: S.grid(300) },
-      h('div', { style: S.card },
-        h('div', { style: S.h2 }, '引导完成度'),
-        h('div', { style: { ...S.row, justifyContent: 'space-between', marginBottom: 6 } },
-          h('span', { style: S.body }, `${done}/${total}`),
-          h(Chip, { tone: percent >= 70 ? 'success' : 'warn' }, `${percent}%`)),
-        h(Bar, { value: percent, tone: percent >= 70 ? T.success : T.warn }),
-        h('div', { style: { ...S.col, gap: 4, marginTop: 10 } },
-          checks.map((c) => h('div', { key: c.key, style: { ...S.row, gap: 6, ...S.muted } },
-            h('span', { style: { color: c.done ? T.success : T.muted, width: 12 } }, c.done ? '✓' : '○'),
-            h('span', null, c.label)))),
-        percent < 100
-          ? h('div', { style: { marginTop: 10 } }, h(Btn, { kind: 'primary', onClick: () => onNavigate('resume') }, '去完善画像'))
-          : null),
+    h('section', { style: section },
+      h('div', { style: { ...wrapRow, justifyContent: 'space-between' } },
+        h('h2', { style: S.h2 }, '值得推进的机会'),
+        h(Btn, { kind: 'ghost', onClick: () => onNavigate('radar') }, '查看岗位列表')),
+      h('div', { style: S.muted }, '推荐反映与你目标的契合度，不是录用概率；是否在招需单独看核验信息。'),
+      recommendations.length ? h('div', null, recommendations.map((job, index) => h('article', { key: job.id || index, style: itemStyle },
+        h('div', { style: { ...wrapRow, justifyContent: 'space-between', alignItems: 'flex-start' } },
+          h('div', { style: { ...S.col, gap: 4, flex: '1 1 240px', minWidth: 0 } },
+            h('div', { style: { ...S.body, fontWeight: 600, overflowWrap: 'anywhere' } }, [text(job.company), text(job.title)].filter(Boolean).join(' · ') || '岗位信息待补充'),
+            h('div', { style: S.muted }, [text(job.location), ({ autumn_campus: '秋招', spring_campus: '春招', summer: '暑期实习', daily: '日常实习', campus: '校招', social: '社招', intern: '实习' })[job.recruitType] || text(job.recruitType), job.deadline ? `截止 ${text(job.deadline)}` : ''].filter(Boolean).join(' · '))),
+          h(Btn, { onClick: () => onNavigate('radar', job.id) }, '查看岗位')),
+        h('div', { style: { ...wrapRow, marginTop: 8 } },
+          h(Chip, { tone: job.fit?.reliable === true ? 'accent' : 'warn' }, job.fit?.reliable === true && typeof job.fit?.score === 'number' ? `目标匹配 ${number(job.fit.score)}` : '匹配信息不足'),
+          h('span', { style: S.muted }, text(job.statusDisplay) || '招聘状态待核实'),
+          h('span', { style: S.muted }, job.verifiedAt ? `核验于 ${text(job.verifiedAt)}` : '尚无核验时间')),
+        list(job.reasons).length ? h('div', { style: { ...S.body, marginTop: 8 } }, '推荐理由：', list(job.reasons).map(text).filter(Boolean).join('；')) : h('div', { style: { ...S.muted, marginTop: 8 } }, '推荐理由尚未提供。'),
+        list(job.gaps).length ? h('div', { style: { ...S.muted, marginTop: 4 } }, '待补齐 / 核实：', list(job.gaps).map(text).filter(Boolean).join('；')) : null)))
+        : h('div', { style: section }, h('div', { style: S.muted }, '暂无可展示的推荐。先添加岗位、补全画像或查看公司情报，不会为凑数生成推荐。'), entryActions())),
 
-      h('div', { style: S.card },
-        h('div', { style: S.h2 }, '今日待办'),
-        (closing.length || follow.overdue || follow.interviews)
-          ? h('div', { style: S.col },
-            follow.overdue ? h('div', { style: S.row },
-              h(Chip, { tone: 'warn' }, '逾期'), h('span', { style: S.body }, `${follow.overdue} 个投递待跟进`)) : null,
-            follow.interviews ? h('div', { style: S.row },
-              h(Chip, { tone: 'accent' }, '面试'), h('span', { style: S.body }, `${follow.interviews} 个岗位进入面试阶段`)) : null,
-            closing.slice(0, 5).map((job) => h('div', { key: job.id, style: { ...S.row, justifyContent: 'space-between', gap: 6 } },
-              h('span', { style: { ...S.body, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${job.company_name} · ${job.title}`),
-              h(Chip, { tone: job.daysLeft <= 2 ? 'error' : 'warn' }, `${job.daysLeft} 天`))))
-          : h('div', { style: S.muted }, '暂无紧急事项。'),
+    h('section', { style: section },
+      h('div', { style: { ...wrapRow, justifyContent: 'space-between' } },
+        h('h2', { style: S.h2 }, '投递进展 · Pipeline'),
+        h(Btn, { kind: 'ghost', onClick: () => onNavigate('tracker') }, '管理投递')),
+      pipeline.length ? h('div', { style: { ...wrapRow, alignItems: 'stretch' } }, pipeline.map((stage, index) => h('button', {
+        key: stage.status || index, type: 'button', onClick: () => onNavigate('tracker'),
+        style: { ...S.btn('ghost'), display: 'flex', gap: 12, alignItems: 'center', flex: '1 1 120px', justifyContent: 'space-between', padding: '10px 12px' },
+      }, h('span', null, text(stage.label) || text(stage.status)), h('strong', null, number(stage.count)))))
+        : h('div', { style: S.muted }, '暂无投递进展数据。到投递管理记录申请与下一步行动。')),
 
-        h('div', { style: { ...S.h2, marginTop: 14 } }, '最近发现的岗位'),
-        newlyFound.length
-          ? h('div', { style: S.col }, newlyFound.slice(0, 5).map((j) => h('div', { key: j.id, style: { ...S.row, justifyContent: 'space-between', gap: 6 } },
-            h('span', { style: { ...S.body, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${j.company_name} · ${j.title}`),
-            h(Chip, null, j.location || '地点未知'))))
-          : h('div', { style: S.muted }, '还没有新岗位。去「岗位雷达」粘贴 JD，或在「设置」登记官方招聘页。')),
+    h('section', { style: section },
+      h('h2', { style: S.h2 }, '最近变化'),
+      changes.length ? h('div', null, changes.slice(0, 5).map((change, index) => h('div', { key: change.id || index, style: itemStyle },
+        h('div', { style: { ...wrapRow, justifyContent: 'space-between' } },
+          h('div', { style: { ...S.body, fontWeight: 550 } }, text(change.title) || (typeof change === 'string' ? text(change) : '有新的更新')),
+          change.created_at ? h('span', { style: S.muted }, relTime(change.created_at)) : null),
+        change.body ? h('div', { style: { ...S.muted, marginTop: 4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, text(change.body)) : null,
+        change.job_id ? h(Btn, { kind: 'ghost', onClick: () => onNavigate('radar', change.job_id) }, '查看岗位') : null)))
+        : h('div', { style: S.muted }, '暂无新的变化。')),
 
-      h('div', { style: S.card },
-        h('div', { style: { ...S.row, justifyContent: 'space-between' } },
-          h('div', { style: S.h2 }, '提醒'),
-          h(Btn, { kind: 'ghost', onClick: onRefresh }, '刷新')),
-        notifications.length
-          ? h('div', { style: S.col }, notifications.slice(0, 8).map((n) => h('div', { key: n.id, style: S.cardTight },
-            h('div', { style: { ...S.row, justifyContent: 'space-between', gap: 6 } },
-              h('span', { style: { ...S.body, fontWeight: 600 } }, n.title),
-              h(Chip, { tone: n.severity === 'high' ? 'error' : n.severity === 'low' ? undefined : 'warn' }, relTime(n.created_at))),
-            n.body ? h('div', { style: { ...S.muted, marginTop: 4, whiteSpace: 'pre-wrap' } }, n.body) : null,
-            n.action ? h('div', { style: { ...S.muted, marginTop: 4, color: T.accent } }, `建议：${n.action}`) : null)))
-          : h('div', { style: S.muted }, '暂无提醒。监控规则触发后会出现在这里。')),
-
-      h('div', { style: S.card },
-        h('div', { style: S.h2 }, '系统状态'),
-        h('div', { style: { ...S.col, gap: 5 } },
-          h('div', { style: { ...S.row, justifyContent: 'space-between' } }, h('span', { style: S.muted }, '数据库'), h('span', { style: S.mono }, `schema v${db.schemaVersion ?? '?'} · ${db.ftsMode ?? '?'}`)),
-          h('div', { style: { ...S.row, justifyContent: 'space-between' } }, h('span', { style: S.muted }, '数据目录'), h('span', { style: { ...S.mono, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, status.dataDir)),
-          h('div', { style: { ...S.row, justifyContent: 'space-between' } }, h('span', { style: S.muted }, '定时监控'), h(Chip, { tone: status.scheduleEnabled ? 'success' : undefined }, status.scheduleEnabled ? '已开启' : '关闭（手动触发）')),
-          h('div', { style: { ...S.row, justifyContent: 'space-between' } }, h('span', { style: S.muted }, '当前简历'), h('span', { style: S.body }, activeResume ? activeResume.label : '未导入')))),
-    ))
+    h('details', { style: { borderTop: `1px solid ${T.border}`, paddingTop: 12 } },
+      h('summary', { style: { ...S.body, cursor: 'pointer', fontWeight: 550 } }, '数据与健康诊断'),
+      h('div', { style: { ...S.col, gap: 12, marginTop: 12 } },
+        h('div', { style: S.muted }, `${text(coverage.scope) || '已加载的本地数据'}；以下健康指标仅针对本次加载范围，不代表全库。`),
+        coverage.loadedJobs != null ? h('div', { style: S.muted }, `本次已加载岗位 ${number(coverage.loadedJobs)}${coverage.maxJobs != null ? `（最多 ${number(coverage.maxJobs)}）` : ''}；申请 ${number(coverage.loadedApplications)}${coverage.maxApplications != null ? `（最多 ${number(coverage.maxApplications)}）` : ''}。`) : null,
+        h('div', { style: wrapRow },
+          h('span', { style: S.muted }, `岗位 ${number(health.total)}`),
+          h('span', { style: S.muted }, `正文完整 ${number(health.textComplete)}`),
+          h('span', { style: S.muted }, `核验在招 ${number(health.verifiedOpen)}`),
+          h('span', { style: S.muted }, `缺官方链接 ${number(health.missingOfficialLink)}`)),
+        checks.length ? h('div', { style: wrapRow }, checks.map((check, index) => h('span', { key: check.key || index, style: S.muted }, `${check.done ? '✓' : '○'} ${text(check.label)}`))) : null,
+        h('div', { style: S.muted }, `数据库版本 ${db.schemaVersion ?? '—'} · 当前简历：${text(bootstrap.activeResume?.label) || '未提供'} · 定时监控：${status.scheduleEnabled === true ? '已开启' : status.scheduleEnabled === false ? '未开启' : '未知'}`),
+        h('div', { style: wrapRow },
+          h(Btn, { onClick: () => onNavigate('settings') }, '数据源与设置'),
+          h(Btn, { kind: 'ghost', onClick: () => onNavigate('resume') }, '完善画像')))))
 }
 
 // ─── Resume Studio ───────────────────────────────────────────────────────────
@@ -2760,7 +2776,7 @@ function Panel({ onClose }) {
           /* ignore malformed frames */
         }
       })
-      for (const kind of ['jobs', 'applications', 'resume', 'profile', 'monitor', 'company', 'social', 'reports', 'sources', 'knowledge']) {
+      for (const kind of ['jobs', 'applications', 'resume', 'profile', 'monitor', 'company', 'social', 'reports', 'sources', 'knowledge', 'today']) {
         source.addEventListener(kind, () => bump())
       }
     } catch {
@@ -2789,7 +2805,7 @@ function Panel({ onClose }) {
       case 'social': return h(SocialTab, { onNavigate: navigate })
       case 'interview': return h(InterviewTab, { focusCode })
       case 'settings': return h(SettingsTab, { bootstrap: data, onChanged: bump })
-      default: return h(OverviewTab, { bootstrap: data, onNavigate: setTab, onRefresh: bump })
+      default: return h(OverviewTab, { bootstrap: data, onNavigate: navigate, onRefresh: bump })
     }
   }
 

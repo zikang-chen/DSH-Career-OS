@@ -545,7 +545,7 @@ function Panel({ onClose }) {
           /* ignore malformed frames */
         }
       })
-      for (const kind of ['jobs', 'applications', 'resume', 'profile', 'monitor', 'company', 'social', 'reports', 'sources', 'knowledge']) {
+      for (const kind of ['jobs', 'applications', 'resume', 'profile', 'monitor', 'company', 'social', 'reports', 'sources', 'knowledge', 'today']) {
         source.addEventListener(kind, () => bump())
       }
     } catch {
@@ -574,7 +574,7 @@ function Panel({ onClose }) {
       case 'social': return h(SocialTab, { onNavigate: navigate })
       case 'interview': return h(InterviewTab, { focusCode })
       case 'settings': return h(SettingsTab, { bootstrap: data, onChanged: bump })
-      default: return h(OverviewTab, { bootstrap: data, onNavigate: setTab, onRefresh: bump })
+      default: return h(OverviewTab, { bootstrap: data, onNavigate: navigate, onRefresh: bump })
     }
   }
 

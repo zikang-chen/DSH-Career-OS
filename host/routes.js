@@ -22,6 +22,7 @@ import {processKnowledgeOcr,ocrStatus} from './ocr.js'
 import {syncKnowledgeIndex} from './knowledge-sync.js'
 import {assessJob360} from './assessment.js'
 import {buildJob360,assessJobDisplay} from './job360.js'
+import {buildToday,updateTodayTask} from './today.js'
 import { capturePageJson, openForLogin } from './browser.js'
 import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
@@ -113,6 +114,7 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
       resumes: repos.profile.listResumes(),
       skills: repos.profile.listSkills(),
       digest: monitor.buildDigest(),
+      today: buildToday(repos),
       board: repos.applications.board(),
       sources: sourceHealthRows(repos),
       rules: repos.monitor.listRules(),
@@ -131,6 +133,8 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
 
   // ── read ───────────────────────────────────────────────────────────────────
   route('GET', '/bootstrap', () => bootstrap())
+  route('GET', '/today', () => ({ok:true,today:buildToday(repos)}))
+  route('POST', '/today/task', ({body}) => {const result=updateTodayTask(repos,body);panel.publish({kind:'today'});return result})
 
   route('GET', '/jobs', ({ query }) => {
     const profile = repos.profile.getWithResume()

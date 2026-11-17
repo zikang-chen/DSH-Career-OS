@@ -20,6 +20,7 @@ import { fetchOfferShowSalaryHighlights } from './offershow.js'
 import {processKnowledgeOcr,ocrStatus} from './ocr.js'
 import {buildJob360} from './job360.js'
 import {ResearchBudget} from './research-budget.js'
+import {buildToday,updateTodayTask} from './today.js'
 import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
@@ -80,6 +81,8 @@ export function registerCareerTools(ctx, deps) {
     return {ok:true,...repos.knowledge.list(args),stats:repos.knowledge.stats()}
   }}))
   add(makeTool({name:'career_knowledge_ocr',description:'对知识库关联图片执行本机OCR并保留原图哈希/逐图结果。识别默认待人工核对；不上传第三方、不覆盖作者正文。',params:{action:S('status|recognize|agent_prepare|agent_save；agent_prepare后必须read_image再保存；人工确认仅在界面'),id:S('知识库资料id'),index:N('图片序号，从1开始'),text:S('Agent实际看图后的逐字转录，不清楚标〔无法辨认〕')},handler:(args)=>args.action==='status'?ocrStatus({dataDir:config.dataDir}):args.action==='review'?{ok:false,error:'人工核对仅限用户在知识库界面确认，Agent不能代确认'}:processKnowledgeOcr({...args,action:args.action??'recognize'},{repos,config})}))
+
+  add(makeTool({name:'career_today',description:'今日求职优先事项、带理由的推荐与申请进度；可完成/稍后/忽略个人待办，不代表已向外部投递。',params:{action:S('get|done|snooze|ignore'),id:S('待办id'),until:S('稍后时间ISO，可选默认24小时')},handler:args=>{if(!args.action||args.action==='get')return {ok:true,today:buildToday(repos)};return updateTodayTask(repos,args)}}))
 
   // ── system / profile ───────────────────────────────────────────────────────
   add(makeTool({

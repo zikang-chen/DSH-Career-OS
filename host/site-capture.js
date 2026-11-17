@@ -190,7 +190,7 @@ async function captureSiteInternal(args = {}, {config,repos,panel,logger,budget,
       const knowledgeItem=repos.knowledge?.upsert({kind:'interview',title:it.title,company:args.company??null,role:args.role??null,platform:'xiaohongshu',url:it.url,publishedAt:it.publishedAt,body:it.desc??'',completeness:it.bodyStatus==='detail'?'full':'summary',evidenceLevel:'C',media:(it.media?.images??[]).map(image=>({...image,ocrStatus:'pending'})),sourceEntityType:'forum_post',sourceEntityId:post.id})
       if(args.autoOcr===true && knowledgeItem) for(let imageIndex=0;imageIndex<knowledgeItem.media.length && ocrProcessed<5;imageIndex++){
         if(knowledgeItem.media[imageIndex].ocrStatus==='reviewed')continue
-        const result=await budget.visit('图片本地识别',()=>processKnowledgeOcr({id:knowledgeItem.id,index:imageIndex+1},{repos,config}))
+        const result=await budget.visit('图片本地识别',()=>processKnowledgeOcr({id:knowledgeItem.id,index:imageIndex+1},{repos,config,budget}))
         ocrProcessed++
         if(!result.ok)ocrFailures.push({title:it.title,index:imageIndex+1,error:result.image?.error})
       }

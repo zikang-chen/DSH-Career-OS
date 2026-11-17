@@ -10,7 +10,10 @@ const sha=(b)=>createHash('sha256').update(b).digest('hex')
 export function allowedImageUrl(value){
  try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&/(^|\.)(?:xhscdn\.com|xiaohongshu\.com|nowcoder\.com|nowcoder\.net)$/.test(u.hostname)}catch{return false}
 }
-async function runOcrProcess({dataDir,imagePath,status=false}){
+async function runOcrProcess({dataDir,imagePath,status=false,signal,deadlineAt}){
+  if(signal?.aborted)throw new Error('图片识别已取消')
+  const remaining=deadlineAt?deadlineAt-Date.now():30000
+  if(remaining<1000)throw new Error('图片识别预算不足，未启动子进程')
  const dir=path.join(dataDir,'ocr');fs.mkdirSync(dir,{recursive:true})
  const output=path.join(dir,`${randomUUID()}.out.json`),error=output+'.err'
  const out=fs.openSync(output,'w'),err=fs.openSync(error,'w')
@@ -18,9 +21,12 @@ async function runOcrProcess({dataDir,imagePath,status=false}){
  let code
  try{code=await new Promise((resolve,reject)=>{
    const child=spawn('powershell.exe',args,{stdio:['ignore',out,err],windowsHide:true})
-   const timer=setTimeout(()=>{child.kill();reject(new Error('本地OCR超过30秒'))},30000)
-   child.once('error',e=>{clearTimeout(timer);reject(e)})
-   child.once('close',c=>{clearTimeout(timer);resolve(c)})
+   let stopReason=null
+   const abort=()=>{stopReason='图片识别已取消';child.kill()}
+   const timer=setTimeout(()=>{stopReason='图片识别达到时间预算';child.kill()},Math.min(30000,remaining))
+   signal?.addEventListener('abort',abort,{once:true})
+   child.once('error',e=>{clearTimeout(timer);signal?.removeEventListener('abort',abort);reject(e)})
+   child.once('close',c=>{clearTimeout(timer);signal?.removeEventListener('abort',abort);stopReason?reject(new Error(stopReason)):resolve(c)})
  })}finally{fs.closeSync(out);fs.closeSync(err)}
  const raw=fs.readFileSync(output,'utf8').replace(/^\uFEFF/,'')
  if(code!==0)throw new Error('本地OCR失败：'+fs.readFileSync(error,'utf8').slice(0,600))
@@ -63,7 +69,10 @@ export async function downloadVisibleImage({url,dataDir}){
   return {filePath,sha256:hash,bytes:bytes.length,mime:found.mime}
  }finally{off?.();if(targetId)await c.send('Target.closeTarget',{targetId},undefined,1500).catch(()=>{});c.close()}
 }
-export async function processKnowledgeOcr({id,index=1,action='recognize',text},{repos,config,download=downloadVisibleImage,recognize=runOcrProcess}={}){
+export async function processKnowledgeOcr({id,index=1,action='recognize',text,force=false},{repos,config,budget,signal,deadlineAt,download=downloadVisibleImage,recognize=runOcrProcess}={}){
+ budget?.check()
+ signal=signal??budget?.signal;deadlineAt=deadlineAt??budget?.deadline
+ if(signal?.aborted)throw new Error('图片识别已取消')
  const item=repos.knowledge.get(id);if(!item)throw new Error('知识库资料不存在')
  const media=Array.isArray(item.media)?structuredClone(item.media):[]
  const at=Number(index)-1;if(!Number.isInteger(at)||at<0||at>=media.length)throw new Error('图片序号无效')
@@ -85,14 +94,18 @@ export async function processKnowledgeOcr({id,index=1,action='recognize',text},{
   image.ocrStatus='reviewed'
   if(image.agentTranscript)image.agentTranscript={...image.agentTranscript,humanConfirmed:true,humanConfirmedAt:new Date().toISOString()}
  }else if(action==='recognize'){
+  if(!force && ['reviewed','review','ai-reviewed'].includes(image.ocrStatus))return {ok:true,image,item,cache:{hit:true},note:'复用已有识别/校对结果，不重新访问图片或覆盖人工修订。'}
   try{
    const original=await download({url:image.url,dataDir:config.dataDir})
-   const result=await recognize({dataDir:config.dataDir,imagePath:original.filePath})
+   budget?.check()
+   const result=await recognize({dataDir:config.dataDir,imagePath:original.filePath,signal,deadlineAt})
    image.original=original
    image.ocr={...result,text:String(result.text??'').slice(0,30000),recognizedAt:new Date().toISOString(),reviewed:false,requiresReview:true,confidence:result.confidence??null}
    image.ocrStatus=result.text?.trim()?'review':'failed'
    if(image.ocrStatus==='failed')image.error='图片未识别出文字，原图仍保留'
   }catch(e){image.ocrStatus='failed';image.error=e.message}
  }else throw new Error('action必须recognize、agent_prepare、agent_save或review')
+ budget?.check()
+ if(signal?.aborted)throw new Error('图片识别已取消，未写入迟到结果')
  return {ok:image.ocrStatus!=='failed',image,item:repos.knowledge.updateMedia(id,media),note:action==='agent_save'?'Agent校对稿独立保存，不是人工确认；模型读图可能使用云端服务。':'OCR独立于作者正文保存，本地识别未经核对不当作可靠逐字引文。'}
 }
