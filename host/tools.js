@@ -758,12 +758,15 @@ export function registerCareerTools(ctx, deps) {
       limit: N('最多导入多少条，默认 200'),
       timeoutMs: N('等待页面加载与请求的毫秒数，默认 25000'),
       scope: S('这次抓取的筛选范围描述，如「岗位类别=产品;城市=北京,上海;招聘类型=暑期实习」。范围一致的两次抓取才能判定「下架」'),
+      useOpenTab: B('从你已经打开的同源标签页抓（会重载该页触发请求）。不知道岗位列表在哪条路由时用这个'),
     },
     required: ['url'],
     handler: async (args) => {
+      const targetUrl = String(args.url)
       const captured = await capturePageJson({
         dataDir: config.dataDir,
-        url: String(args.url),
+        url: targetUrl,
+        matchUrl: args.useOpenTab === true ? targetUrl : undefined,
         patterns: arr(args.patterns).length ? arr(args.patterns).map(String) : undefined,
         timeoutMs: Math.min(Number(args.timeoutMs ?? 25000), 60000),
         logger,

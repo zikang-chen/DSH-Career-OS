@@ -26,8 +26,10 @@ const TITLE_KEYS = ['title', 'name', 'jobName', 'job_name', 'positionName', 'pos
 const LOCATION_KEYS = ['city', 'location', 'workPlace', 'workplace', 'workCity', 'cityName', 'city_name', 'jobCity', 'job_city',
   'cityList', 'address', 'locationName', 'location_name', 'work_place', 'work_city', 'base', 'region', 'city_text',
   // 对象型地点（字节 city_info，其他家 cityInfo / location_info）
-  'city_info', 'cityInfo', 'city_list', 'location_info', 'locationInfo', 'city_detail', 'cities']
-const URL_KEYS = ['url', 'link', 'jobUrl', 'job_url', 'detailUrl', 'detail_url', 'positionUrl', 'position_url', 'href', 'jobHref', 'applyUrl', 'apply_url', 'job_detail_url', 'position_url_pc']
+  'city_info', 'cityInfo', 'city_list', 'location_info', 'locationInfo', 'city_detail', 'cities',
+  // 腾讯用复数且是多城市拼接字符串
+  'workCities', 'work_cities', 'workCityList', 'cityNames', 'work_city_list', 'positionWorkCity']
+const URL_KEYS = ['url', 'link', 'jobUrl', 'job_url', 'detailUrl', 'detail_url', 'positionUrl', 'position_url', 'href', 'jobHref', 'applyUrl', 'apply_url', 'job_detail_url', 'position_url_pc', 'positionLink', 'detailLink']
 const CODE_KEYS = ['id', 'jobId', 'job_id', 'positionId', 'position_id', 'code', 'postId', 'post_id', 'jobCode', 'job_code', 'post_id_str', 'job_post_id']
 const DEPT_KEYS = ['department', 'dept', 'departmentName', 'department_name', 'team', 'bu', 'businessUnit', 'category', 'job_category', 'jobCategory']
 
@@ -88,6 +90,11 @@ function detailUrlFor(baseUrl, code) {
     // 校招与社招是两个站内应用，按来源路径判断，猜不到时按校招。
     const section = /\/experienced/.test(parsed.pathname) ? 'experienced' : 'campus'
     return `https://jobs.bytedance.com/${section}/position/${encodeURIComponent(code)}/detail`
+  }
+  if (/(^|\.)join\.qq\.com$/.test(host)) {
+    // 腾讯校招是 SPA，详情靠 query 参数在 post.html 里展开（实测 post.html?id= 返回 200 且是岗位投递页；
+    // postDetail.html / positionDetail.html 都是 404）。这条 URL 未经渲染验证，投递前请手动打开确认。
+    return `https://join.qq.com/post.html?id=${encodeURIComponent(code)}`
   }
   return null
 }
@@ -189,11 +196,11 @@ export function walkJsonForPostings(parsed, baseUrl) {
     const code = firstOf(node, CODE_KEYS)
     const rawUrl = firstOf(node, URL_KEYS)
     const location = firstOf(node, LOCATION_KEYS)
-    // 只认「像岗位 id」的代码：字典项（recruit_type: {id:"1", name:"暑期实习"}）也带 id+name，
-    // 但那种短枚举值不是岗位，会把字典表误当成岗位列表。
-    const codeLooksReal = Boolean(code && /^[0-9a-zA-Z_-]{8,}$/.test(code))
-    // 有 id 也算数：国内校招接口普遍只给岗位 id、不给详情链接，靠 id 能拼出投递页。
-    if (title && (rawUrl || location || codeLooksReal) && looksLikeJobTitle(title)) {
+    const description = firstOf(node, ['description', 'jobDescription', 'job_description', 'requirement', 'requirements', 'positionDesc'])
+    // 判定「这是一条岗位」：标题 + 至少一个只有岗位才有的字段。
+    // 地点/链接/描述挑一个即可；只有「标题 + 编号」的通常是字典项
+    // （如腾讯 dictionary 返回的 {did:6317, name:"实习生", code:"2"}），不能当岗位。
+    if (title && (rawUrl || location || description) && looksLikeJobTitle(title)) {
       const url = rawUrl ? absolute(rawUrl, baseUrl) : detailUrlFor(baseUrl, code)
       const key = `${title}|${location ?? ''}`
       if (!seen.has(key)) {
@@ -204,9 +211,9 @@ export function walkJsonForPostings(parsed, baseUrl) {
           location: str(location, 200),
           department: str(firstOf(node, DEPT_KEYS), 200),
           jobCode: str(code, 120),
-          description: str(node.description ?? node.jobDescription ?? node.job_description ?? node.requirement ?? node.requirements, 20000),
-          requirements: str(node.requirement ?? node.requirements, 20000),
-          recruitTypeText: firstOf(node, ['recruit_type', 'recruitType', 'recruitment_type', 'recruitmentType']),
+          description: str(description, 20000),
+          requirements: str(firstOf(node, ['requirement', 'requirements', 'jobRequirement']), 20000),
+          recruitTypeText: firstOf(node, ['recruit_type', 'recruitType', 'recruitment_type', 'recruitmentType', 'projectName', 'positionSource']),
           publishedAt: str(node.publishTime ?? node.publish_time ?? node.publishDate ?? node.createTime ?? node.create_time, 40),
           deadline: parseDeadline(String(node.deadline ?? node.endTime ?? node.end_time ?? node.validThrough ?? '')),
           via: 'embedded',
@@ -418,6 +425,15 @@ export async function crawlListing(url, opts = {}) {
 /** Normalize one crawled posting into the shape `JobRepo.upsertJob` accepts. */
 export function postingToJob(posting, { company, pageUrl, pageText } = {}) {
   const haystack = [posting.title, posting.description, posting.department, posting.recruitTypeText, pageText].filter(Boolean).join('\n')
+  // 有些站点把批次写在 projectName 里（腾讯：「应届毕业生」/「实习生」），
+  // 这些词不在标准词表里，补一层兜底映射，认不出就留 null，不硬猜。
+  const batchText = String(posting.recruitTypeText ?? '')
+  const recruitType = parseRecruitType(haystack) ?? (
+    /应届|校园招聘|校招/.test(batchText) ? 'autumn_campus'
+      : /暑期/.test(batchText) ? 'summer'
+        : /实习/.test(batchText) ? 'daily'
+          : null
+  )
   return {
     company: posting.company ?? company,
     title: posting.title,
@@ -429,7 +445,7 @@ export function postingToJob(posting, { company, pageUrl, pageText } = {}) {
     description: posting.description ?? null,
     requirements: posting.requirements ?? posting.description ?? null,
     internshipType: parseInternshipType(haystack),
-    recruitType: parseRecruitType(haystack),
+    recruitType,
     remoteType: parseRemoteType(haystack),
     publishedAt: posting.publishedAt ?? null,
     deadline: posting.deadline ?? parseDeadline(haystack),

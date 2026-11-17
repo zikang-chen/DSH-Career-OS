@@ -92,13 +92,18 @@ async function cdpVersion(port, timeoutMs = 1500) {
  * 启动（或复用）专用浏览器。
  * @returns {{ok:boolean, port:number|null, executable:string|null, profileDir:string, started:boolean, error?:string}}
  */
-export async function ensureBrowser({ dataDir, logger, extraArgs = [] } = {}) {
+export async function ensureBrowser({ dataDir, logger, extraArgs = [], noProxy = true } = {}) {
   const profileDir = browserProfileDir(dataDir)
   const previous = readBrowserState(dataDir)
   if (previous?.port) {
     const alive = await cdpVersion(previous.port)
-    if (alive) {
+    // 代理模式变了就得重启：正在跑的实例带着旧的网络设置。
+    const sameMode = (previous.noProxy ?? true) === noProxy
+    if (alive && sameMode) {
       return { ok: true, port: previous.port, executable: previous.executable ?? null, profileDir, started: false, note: '复用已运行的专用浏览器' }
+    }
+    if (alive && !sameMode) {
+      await closeBrowser({ dataDir, logger })
     }
   }
 
@@ -120,6 +125,8 @@ export async function ensureBrowser({ dataDir, logger, extraArgs = [] } = {}) {
     '--no-default-browser-check',
     '--disable-features=Translate,msEdgeSidebarV2,msShoppingHub',
     '--window-size=1280,900',
+    // 校招站是境内站点，直连即可；跟着系统代理走反而可能被挡（实测 join.qq.com 直连通、走代理报错）。
+    ...(noProxy ? ['--no-proxy-server'] : []),
     ...extraArgs,
     'about:blank',
   ]
@@ -140,13 +147,13 @@ export async function ensureBrowser({ dataDir, logger, extraArgs = [] } = {}) {
   if (!info) {
     return { ok: false, port, executable, profileDir, started: true, error: '浏览器已启动但调试端口没响应（可能被安全策略拦住）' }
   }
-  writeBrowserState(dataDir, { port, executable, profileDir, startedAt: new Date().toISOString() })
-  logger?.info?.('browser started', { port, executable })
-  return { ok: true, port, executable, profileDir, started: true, product: info.Browser ?? null }
+  writeBrowserState(dataDir, { port, executable, profileDir, noProxy, startedAt: new Date().toISOString() })
+  logger?.info?.('browser started', { port, executable, noProxy })
+  return { ok: true, port, executable, profileDir, started: true, noProxy, product: info.Browser ?? null }
 }
 
 // ─── 极简 CDP 客户端 ─────────────────────────────────────────────────────────
-class CdpConnection {
+export class CdpConnection {
   constructor(wsUrl) {
     this.wsUrl = wsUrl
     this.socket = null
@@ -236,16 +243,39 @@ export function rankResponseCandidate({ url = '', mimeType = '', size = 0 }, pat
     }
   }
   if (/\/api\//.test(lower)) { score += 8; reasons.push('/api/') }
+  // 「查询/列表」语义比别的强
+  if (/(search|query|joblist|postlist|paged?list)/.test(lower)) { score += 18; reasons.push('查询语义') }
+  // 字典/配置/横幅/城市映射这类永远不是岗位列表，即使 URL 里带 post 字样
+  // （腾讯的 /api/v1/dictionary/?types=...,RecruitProjectPostList 就被 post 命中过）
+  if (/(dictionary|config|setting|banner|mapping|workcity|getcity|family|filter)/.test(lower)) {
+    score -= 40
+    reasons.push('配置类降权')
+  }
   if (size > 2000) { score += 5; reasons.push('体积较大') }
   if (size > 60000) { score -= 3; reasons.push('体积过大') }
+  // encodedDataLength 在压缩响应上并不可靠（腾讯 10 条岗位只报 73 字节），
+  // 所以这里只轻微降权，真正的「空结果」由解析后的岗位条数决定。
+  if (size > 0 && size < 500) { score -= 6; reasons.push('体积偏小') }
   return { score, reason: reasons.join(',') || '一般 JSON' }
+}
+
+/** 只看真正的网络请求：data:/blob: 是内联资源，既没用又会把候选列表淹没。 */
+function isNetworkUrl(url) {
+  return /^https?:/i.test(String(url ?? ''))
 }
 
 /**
  * 打开一个页面，捕获它自己发出的 JSON 响应，挑最像岗位列表的那个返回。
- * @returns {{ok:boolean, captured?:object, candidates?:Array, error?:string}}
+ *
+ * 两种模式：
+ *   - `matchUrl`：先在已打开的标签页里找同源页面，附着上去 **重新加载**（登录态在，XHR 重新发一遍）。
+ *     用于「我不知道岗位列表在哪条路由，但用户已经点进去了」这种情况。
+ *   - 否则新开标签导航到 `url`。
  */
-export async function capturePageJson({ dataDir, url, patterns = ['job', 'post', 'position', 'search', 'campus', 'recruit'], timeoutMs = 25000, logger } = {}) {
+export async function capturePageJson({
+  dataDir, url, matchUrl, patterns = ['job', 'post', 'position', 'search', 'campus', 'recruit'],
+  timeoutMs = 25000, logger,
+} = {}) {
   const browser = await ensureBrowser({ dataDir, logger })
   if (!browser.ok) return { ok: false, error: browser.error, browser }
 
@@ -255,14 +285,48 @@ export async function capturePageJson({ dataDir, url, patterns = ['job', 'post',
 
   const cdp = await new CdpConnection(wsUrl).connect()
   try {
-    const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' })
-    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true })
+    let targetId = null
+    let attached = null
+    let reusedTab = false
 
+    // 优先复用用户已经打开的标签页
+    if (matchUrl) {
+      const { targetInfos = [] } = await cdp.send('Target.getTargets')
+      const wanted = new URL(matchUrl)
+      const candidates = targetInfos
+        .filter((target) => target.type === 'page' && isNetworkUrl(target.url))
+        .filter((target) => {
+          try {
+            const origin = new URL(target.url)
+            return origin.origin === wanted.origin
+              && (target.url.includes(wanted.pathname) || wanted.pathname === '/')
+          } catch {
+            return false
+          }
+        })
+      if (candidates.length) {
+        // 取最后一个：通常是最新打开的那个
+        const picked = candidates[candidates.length - 1]
+        targetId = picked.targetId
+        attached = await cdp.send('Target.attachToTarget', { targetId, flatten: true })
+        reusedTab = true
+      }
+    }
+
+    if (!targetId) {
+      if (!url) return { ok: false, error: '既没有可复用的标签页，也没给 url', browser }
+      const created = await cdp.send('Target.createTarget', { url: 'about:blank' })
+      targetId = created.targetId
+      attached = await cdp.send('Target.attachToTarget', { targetId, flatten: true })
+    }
+
+    const sessionId = attached.sessionId
     const responses = new Map()
     const off = cdp.on((message) => {
       if (message.sessionId !== sessionId) return
       if (message.method !== 'Network.responseReceived') return
       const { requestId, response } = message.params
+      if (!isNetworkUrl(response.url)) return
       responses.set(requestId, {
         requestId,
         url: response.url,
@@ -274,9 +338,10 @@ export async function capturePageJson({ dataDir, url, patterns = ['job', 'post',
 
     await cdp.send('Network.enable', {}, sessionId)
     await cdp.send('Page.enable', {}, sessionId)
-    await cdp.send('Page.navigate', { url }, sessionId)
+    // 复用时不能导航（用户可能在登录流程里），只重载当前页让 XHR 重新发一遍
+    if (reusedTab) await cdp.send('Page.reload', { ignoreCache: true }, sessionId)
+    else await cdp.send('Page.navigate', { url }, sessionId)
 
-    // 等页面网络安静下来：固定窗口 + 一有候选就多等一会
     const started = Date.now()
     let best = null
     while (Date.now() - started < timeoutMs) {
@@ -298,8 +363,8 @@ export async function capturePageJson({ dataDir, url, patterns = ['job', 'post',
       .map(({ requestId, url: responseUrl, status, mimeType, size, score, reason }) => ({ requestId, url: responseUrl, status, mimeType, size, score, reason }))
 
     if (!best) {
-      await cdp.send('Target.closeTarget', { targetId }).catch(() => {})
-      return { ok: false, error: '页面没有发出像「岗位列表」的 JSON 请求', candidates, browser }
+      if (!reusedTab) await cdp.send('Target.closeTarget', { targetId }).catch(() => {})
+      return { ok: false, error: '页面没有发出像「岗位列表」的 JSON 请求', candidates, reusedTab, browser }
     }
 
     const body = await cdp.send('Network.getResponseBody', { requestId: best.requestId }, sessionId)
@@ -307,16 +372,15 @@ export async function capturePageJson({ dataDir, url, patterns = ['job', 'post',
     try {
       json = JSON.parse(body?.body ?? '')
     } catch {
-      // base64 编码的响应体
       try {
         json = JSON.parse(Buffer.from(body?.body ?? '', 'base64').toString('utf8'))
       } catch {
         json = null
       }
     }
-    await cdp.send('Target.closeTarget', { targetId }).catch(() => {})
-    if (json === null) return { ok: false, error: '响应体不是 JSON（可能被压缩或需要二次请求）', candidates, browser }
-    return { ok: true, captured: { url: best.url, status: best.status, bytes: String(body?.body ?? '').length, json }, candidates, browser }
+    if (!reusedTab) await cdp.send('Target.closeTarget', { targetId }).catch(() => {})
+    if (json === null) return { ok: false, error: '响应体不是 JSON（可能被压缩或需要二次请求）', candidates, reusedTab, browser }
+    return { ok: true, captured: { url: best.url, status: best.status, bytes: String(body?.body ?? '').length, json }, candidates, reusedTab, browser }
   } finally {
     cdp.close()
   }
