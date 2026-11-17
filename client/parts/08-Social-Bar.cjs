@@ -13,6 +13,8 @@ function KnowledgeCapture({ onImported }) {
   const [form, setForm] = useState({ site: 'xhs', keyword: '', recruitType: '', limit: 20, autoOcr: false })
   const [result, setResult] = useState(null)
   const [previewArgs, setPreviewArgs] = useState(null)
+  const [taskId,setTaskId]=useState(null)
+  const [taskProgress,setTaskProgress]=useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const jobSite = ['boss', '51job'].includes(form.site)
@@ -28,10 +30,22 @@ function KnowledgeCapture({ onImported }) {
     else setPreviewArgs(null)
     try {
       // apiPost intentionally throws on ok:false and loses its structured gaps/preview.
-      const response = await fetch(`${API}/site/capture`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...args, dryRun }) })
+      const response = await fetch(`${API}/research/start`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...args, dryRun }) })
       const text = await response.text()
       let data
       try { data = JSON.parse(text) } catch { throw new Error(`采集接口返回异常（HTTP ${response.status}）：${text.slice(0, 160)}`) }
+      if(response.ok&&data.id){
+        setTaskId(data.id)
+        const end=Date.now()+105000
+        while(Date.now()<end){
+          await new Promise(resolve=>setTimeout(resolve,900))
+          const task=await apiGet(`/research/task?id=${encodeURIComponent(data.id)}`)
+          setTaskProgress(task)
+          if(task.status!=='running'){data=task.result??{ok:false,error:task.error||task.resultNote||'任务结束但结果不可用'};break}
+        }
+        if(data.id&&!data.result&&data.status==='running') {await apiPost('/research/cancel',{id:data.id});data={ok:false,error:'任务超出界面等待预算，已请求停止；可在设置查看运行记录'}}
+        setTaskId(null)
+      }
       setResult(data)
       if (!response.ok || data.ok !== true) setError(data.error || `采集未成功（HTTP ${response.status}），请检查下方缺口。`)
       else if (dryRun) setPreviewArgs((data.preview || []).length ? args : null)
@@ -48,6 +62,7 @@ function KnowledgeCapture({ onImported }) {
       h(Field, { label: '数量上限（1–200）' }, h('input', { type: 'number', min: 1, max: 200, style: S.input, value: form.limit, onChange: set('limit'), disabled: busy }))),
     form.site === 'xhs' ? h('label',{style:{...S.muted,display:'flex',gap:8}},h('input',{type:'checkbox',checked:form.autoOcr,disabled:busy,onChange:e=>{setForm({...form,autoOcr:e.target.checked});setPreviewArgs(null)}}),'确认入库后自动本地识别图片（每批最多5张，不上传第三方；仍需校对）') : null,
     h('div', { style: { ...S.row, flexWrap: 'wrap' } }, h(Btn, { kind: 'primary', disabled: busy, onClick: () => run(true) }, busy ? '采集中…' : '预览采集（不入库）'), previewArgs ? h(Btn, { disabled: busy, onClick: () => run(false) }, '确认入库（按同条件重新采集）') : null),
+    taskId ? h('div',{role:'status',style:S.cardTight},h('div',{style:S.h3},`研究执行中 · 已访问 ${taskProgress?.budget?.visits??0} / ${taskProgress?.budget?.maxVisits??6} 次`),h('div',{style:S.muted},taskProgress?.budget?.steps?.slice(-1)[0]?.label||'准备后台采集'),h(Btn,{onClick:()=>apiPost('/research/cancel',{id:taskId}).catch(e=>setError(e.message))},'取消研究')):null,
     error ? h('div', { role: 'alert', style: { ...S.cardTight, color: T.error } }, `未成功：${error}。不会将失败显示为入库成功；如有部分写入，请核对返回明细。`) : null,
     result ? h('div', { style: S.col },
       h('div', { role: 'status', style: S.h3 }, result.ok !== true ? '采集失败 / 存在缺口' : result.dryRun === false ? '入库请求已完成' : '仅预览 · 尚未入库'),

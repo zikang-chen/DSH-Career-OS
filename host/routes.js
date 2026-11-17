@@ -23,6 +23,7 @@ import {syncKnowledgeIndex} from './knowledge-sync.js'
 import {assessJob360} from './assessment.js'
 import {buildJob360,assessJobDisplay} from './job360.js'
 import {buildToday,updateTodayTask} from './today.js'
+import {createResearchTasks} from './research-tasks.js'
 import { capturePageJson, openForLogin } from './browser.js'
 import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
@@ -85,6 +86,7 @@ function assertSameOrigin(req) {
 }
 
 export function registerRoutes({ webServer, repos, monitor, panel, exporter, config, logger, search, clientHealth, webService, db }) {
+  const researchTasks=createResearchTasks({repos,config,panel,logger})
   const routes = []
   const route = (method, pattern, handler) => {
     const keys = []
@@ -319,6 +321,9 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
   })
 
   route('POST', '/site/capture', ({ body }) => captureSite(body, { config, repos, panel, logger }))
+  route('POST', '/research/start', ({body}) => researchTasks.start(body))
+  route('GET', '/research/task', ({query}) => researchTasks.get(String(query.get('id'))))
+  route('POST', '/research/cancel', ({body}) => researchTasks.cancel(String(body.id)))
 
   route('GET', '/monitor/rules', () => ({ ok: true, rules: repos.monitor.listRules() }))
   route('GET', '/monitor/runs', ({ query }) => ({ ok: true, runs: repos.monitor.listRuns(Number(query.get('limit') ?? 30)) }))
@@ -995,5 +1000,5 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
 
   const dispose = webServer.register({ kind: 'prefix', path: API_PREFIX, handler })
   logger.info('career routes registered', { prefix: API_PREFIX, routes: routes.length })
-  return { dispose, routes: routes.length }
+  return { dispose:()=>{researchTasks.dispose();dispose?.()}, routes: routes.length }
 }

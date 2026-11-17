@@ -1,0 +1,7 @@
+import assert from'node:assert/strict'
+import{it}from'node:test'
+import{makeEnv}from'./helpers.mjs'
+import{createResearchTasks}from'../host/research-tasks.js'
+const flush=()=>new Promise(r=>setImmediate(r))
+it('dedupes a running research task and persists terminal audit',async()=>{const e=makeEnv();try{let resolve,calls=0;const tasks=createResearchTasks({repos:e.repos,config:{dataDir:e.dir}},{capture:()=>{calls++;return new Promise(r=>resolve=r)}});const a=tasks.start({site:'boss',keyword:'产品',dryRun:true});await flush();const b=tasks.start({site:'boss',keyword:'产品',dryRun:true});assert.equal(a.id,b.id);assert.equal(calls,1);resolve({ok:true,found:2});await flush();assert.equal(tasks.get(a.id).status,'ok');assert.equal(tasks.get(a.id).result.found,2);assert.ok(e.repos.monitor.listRuns().some(r=>r.kind==='research_task'))}finally{e.cleanup()}})
+it('cancel is idempotent and does not spawn a replacement request',async()=>{const e=makeEnv();try{const tasks=createResearchTasks({repos:e.repos,config:{dataDir:e.dir}},{capture:(a,{signal})=>new Promise(resolve=>signal.addEventListener('abort',()=>resolve({ok:false,error:'cancelled'}),{once:true}))});const a=tasks.start({site:'xhs',keyword:'面经'});await flush();assert.equal(tasks.cancel(a.id).cancelled,true);await flush();assert.equal(tasks.get(a.id).status,'cancelled');assert.equal(tasks.cancel(a.id).cancelled,false)}finally{e.cleanup()}})
