@@ -266,7 +266,13 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
       }
     }
     const real = body.jobId ? repos.intel.listInterviews({ jobId: job?.id, companyId: job?.company_id, limit: 50 }) : []
-    return buildInterviewPlan({ jdText, title: str(body.title, 200) ?? job?.title ?? null, company: companyName, realExperiences: real })
+    return buildInterviewPlan({
+      jdText,
+      title: str(body.title, 200) ?? job?.title ?? null,
+      company: companyName,
+      realExperiences: real,
+      research: Array.isArray(body.research) ? body.research : [],
+    })
   })
 
   route('GET', '/monitor/rules', () => ({ ok: true, rules: repos.monitor.listRules() }))

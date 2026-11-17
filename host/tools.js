@@ -2152,6 +2152,7 @@ export function registerCareerTools(ctx, deps) {
       jobId: S('岗位 id（可选，会自动取库里已存的 JD 正文）'),
       title: S('岗位名（可选）'),
       company: S('公司名（可选）'),
+      research: { type: 'array', items: { type: 'object' }, description: '外部调研材料：[{source,url,publishedAt,evidenceLevel,questions:[]}]，把你在牛客/知乎等合法看到的面经问题传入，本工具会跨来源去重聚合' },
     },
     handler: (args) => {
       let jdText = str(args.jd, 20000)
@@ -2172,6 +2173,7 @@ export function registerCareerTools(ctx, deps) {
         title: str(args.title, 200) ?? job?.title ?? null,
         company: companyName,
         realExperiences: real,
+        research: Array.isArray(args.research) ? args.research : [],
       })
     },
   }))

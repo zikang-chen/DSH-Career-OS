@@ -107,12 +107,16 @@ Dashboard「推荐机会」改为调用 `/match/rank` 真实匹配排序；岗�
 `.careeros-root` 内定义浅色/深色两套 `--careeros-*`，通过 `@media (prefers-color-scheme: dark)` 切换。
 宿主提供 token 时优先用宿主的，没有时也能跟随系统深色。
 
-### P4-13 JD → 面试问题与知识点 ✅ 新增
+### P4-13 JD → 面试问题与知识点（基于多来源调研）✅ 新增
 
 `host/interview.js` + `career_jd_interview` + `POST /interview/from-jd`：
-从 JD 实际出现的词推导知识点（16 类固定表），生成练习题并**一律标 `ai-practice`**，
-明确声明「不是真实面试题」；给了 jobId 时另附已导入的真实面经（证据 C，来源分离）。
-实测一段 AI 产品 JD → 8 类知识点、19 道练习题，全部 ai-practice。
+- 知识点只从 JD 实际出现的词推导（16 类固定表），JD 没提的不编
+- **广泛调研**：`mergeResearchQuestions` 把「已导入面经」与「外部调研材料（research 参数）」跨来源聚合去重，
+  每题带 `sources[]`（名称/URL/日期/证据等级）与 `seenCount`（被几个独立来源提到）
+- `researchPlan` 给出该去哪些平台、用什么检索词（牛客/小红书/知乎/脉脉/一亩三分地/官方）
+- 生成的问题一律标 `ai-practice`，与真实调研严格分开
+- 诚实边界：牛客/小红书等面经正文需登录或反爬，系统不硬爬；请导入或作为 research 传入
+实测：一段 AI 产品 JD → 8 类知识点、19 道练习题 + 6 条 researchPlan；`tests/interview.test.mjs` 11 用例（含跨来源去重计数）。
 
 ### ~~P1-6 FTS 没被使用~~ —— **本条审计有误，特此更正**
 

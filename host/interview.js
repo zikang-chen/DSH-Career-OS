@@ -103,7 +103,69 @@ export const KNOWLEDGE_MAP = [
   },
 ]
 
-/** 从 JD 文本里找出命中的知识点主题。 */
+/** 归一化问题文本，用于跨来源去重。 */
+export function normalizeQuestion(q) {
+  return String(q ?? '').toLowerCase().replace(/[\s，。？！、,.?!;；:：""''()（）]/g, '')
+}
+
+/**
+ * 跨来源聚合面试题：来自「导入的真实面经」+「外部调研材料」，按问题去重并计数。
+ * seenCount = 有多少个独立来源提到同一题，是「调研广度」的直接信号（不是频率概率）。
+ */
+export function mergeResearchQuestions({ experiences = [], research = [] } = {}) {
+  const map = new Map()
+  const add = (rawQuestion, source) => {
+    const question = String(rawQuestion ?? '').trim()
+    if (!question) return
+    const key = normalizeQuestion(question)
+    if (!key) return
+    if (!map.has(key)) map.set(key, { question, sources: [] })
+    const entry = map.get(key)
+    // 同一来源同一问题只记一次
+    const dup = entry.sources.some((s) => s.kind === source.kind && s.name === source.name && s.url && s.url === source.url)
+    if (!dup) entry.sources.push(source)
+  }
+  for (const exp of experiences ?? []) {
+    const source = {
+      kind: 'imported-forum',
+      name: exp.source_url ? String(exp.source_url) : '已导入面经',
+      url: exp.source_url ?? null,
+      date: exp.year ? String(exp.year) : null,
+      evidenceLevel: exp.evidence_level ?? 'C',
+    }
+    for (const q of exp.questions ?? []) add(q, source)
+  }
+  for (const item of research ?? []) {
+    const source = {
+      kind: 'external-research',
+      name: item.source ?? item.name ?? '外部调研',
+      url: item.url ?? null,
+      date: item.publishedAt ?? item.date ?? null,
+      evidenceLevel: item.evidenceLevel ?? 'C',
+    }
+    for (const q of item.questions ?? []) add(q, source)
+  }
+  return [...map.values()]
+    .map((e) => ({ question: e.question, sources: e.sources, seenCount: e.sources.length }))
+    .sort((a, b) => b.seenCount - a.seenCount)
+}
+
+/** 该去哪些地方调研（平台 + 具体检索词）。只给入口，不代表能自动抓正文。 */
+export function buildResearchQueries({ company, role } = {}) {
+  const c = String(company ?? '').trim()
+  const r = String(role ?? '').trim()
+  const base = [c, r].filter(Boolean).join(' ') || '目标岗位'
+  return [
+    { platform: '牛客网', query: `${base} 面经`, why: '国内校招面经最集中的地方' },
+    { platform: '小红书', query: `${base} 面试 经验`, why: '面试流程与体感描述多' },
+    { platform: '知乎', query: `${base} 面试会问什么`, why: '有较完整的复盘长文' },
+    { platform: '脉脉', query: `${base} 面试`, why: '在职员工视角，注意甄别' },
+    { platform: '一亩三分地', query: `${c || base} 面试`, why: '海外/技术岗面经' },
+    { platform: '公司官方', query: `${c || base} 招聘 面试流程`, why: '流程以官方为准，问题以面经为准' },
+  ]
+}
+
+
 export function extractTopics(jdText) {
   const text = String(jdText ?? '')
   if (!text.trim()) return []
@@ -132,7 +194,7 @@ export function extractJdFacts(jdText) {
  * 生成面试准备方案。
  * @param {{jdText:string, title?:string, company?:string, realExperiences?:Array}} input
  */
-export function buildInterviewPlan({ jdText, title, company, realExperiences = [] } = {}) {
+export function buildInterviewPlan({ jdText, title, company, realExperiences = [], research = [] } = {}) {
   const text = String(jdText ?? '')
   if (!text.trim()) {
     return { ok: false, error: '没有 JD 文本：粘贴岗位描述后再分析' }
@@ -151,6 +213,10 @@ export function buildInterviewPlan({ jdText, title, company, realExperiences = [
   const realQuestions = (realExperiences ?? []).flatMap((exp) =>
     (exp.questions ?? []).map((q) => ({ question: q, source: 'imported-forum', evidenceLevel: exp.evidence_level ?? 'C', stage: exp.stage ?? null, year: exp.year ?? null })))
 
+  // 广泛调研：把「已导入面经」与「外部调研材料」聚合去重，按被多少来源提到排序
+  const researchedQuestions = mergeResearchQuestions({ experiences: realExperiences, research })
+  const researchPlan = buildResearchQueries({ company, role: title })
+
   const uncovered = []
   if (!topics.length) uncovered.push('JD 里没有命中任何已知考察方向——可能是纯管理岗或描述太短，建议补全 JD。')
 
@@ -161,12 +227,16 @@ export function buildInterviewPlan({ jdText, title, company, realExperiences = [
     knowledgePoints,
     questions,
     realQuestions,
-    counts: { topics: topics.length, practiceQuestions: questions.length, realQuestions: realQuestions.length },
+    // 基于多来源调研的题目（含导入面经 + 外部调研），按来源数排序
+    researchedQuestions,
+    researchPlan,
+    counts: { topics: topics.length, practiceQuestions: questions.length, realQuestions: realQuestions.length, researched: researchedQuestions.length },
     caveats: [
       '问题与知识点是**根据 JD 关键词生成的练习方向**（标 ai-practice），不是真实面试题，也不代表公司实际会问。',
-      realQuestions.length
-        ? `另有 ${realQuestions.length} 条来自已导入的论坛面经（证据等级多为 C，样本有限）。`
-        : '还没有导入真实面经；如需要，可用 career_forum_import 导入后会有「真实面经」区。',
+      researchedQuestions.length
+        ? `另有 ${researchedQuestions.length} 道来自多来源调研（导入面经 + 外部材料），每题都带来源与证据等级；seenCount 是提到该题的独立来源数，不代表公司一定会问。`
+        : '还没有可用的面经来源。请用 career_forum_import 导入看到的真实面经，或把调研材料作为 research 传入（source/url/publishedAt/questions），本工具会聚合去重。',
+      '说明：牛客/小红书/知乎/脉脉等平台的面经正文通常需要登录或禁止自动抓取，系统不会硬爬；请把合法看到的正文导入，我再做跨来源合并。',
       ...uncovered,
     ],
   }
