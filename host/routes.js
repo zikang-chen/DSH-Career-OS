@@ -14,6 +14,7 @@ import { compileTex, detectEngines, renderResumeTex, renderResumeText } from './
 import { KIND_LABEL, planTailor, sectionsFromSelection } from './tailor.js'
 import { DOC_LABEL, proposeDocument } from './documents.js'
 import { buildApplyCard, renderApplyCardText } from './applycard.js'
+import { checkResumeQuality } from './quality.js'
 import { buildBrief, buildPlan } from './plan.js'
 import { parsePastedJob } from './sources.js'
 import { sha1ish } from './util.js'
@@ -156,6 +157,20 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
     const job = repos.jobs.getJob(id)
     if (!job) throw new HttpError('岗位不存在', 404)
     return { ok: true, job, statusLabel: STATUS_LABEL[job.status] }
+  })
+
+  route('GET', '/resume/quality', ({ query }) => {
+    const job = query.get('jobId') ? repos.jobs.getJob(String(query.get('jobId'))) : null
+    return {
+      ok: true,
+      ...checkResumeQuality({
+        profile: repos.profile.get(),
+        experiences: repos.profile.listExperiences(),
+        documents: repos.profile.listDocuments({}),
+        job,
+      }),
+      targetJob: job ? { id: job.id, company: job.company_name, title: job.title } : null,
+    }
   })
 
   route('GET', '/resumes', () => ({ ok: true, resumes: repos.profile.listResumes(), active: repos.profile.activeResume()?.id ?? null }))

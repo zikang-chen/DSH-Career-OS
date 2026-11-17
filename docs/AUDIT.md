@@ -141,8 +141,9 @@ Client 曾一次拉 120 条、`listJobs` 只有 `LIMIT` 没 `OFFSET`。**已加 
 | **P1（已完成）** | 5 工作区导航（11 页签全保留）+ Dashboard 行动入口 + 待核验/过期卡片 | `client/index.cjs` | 中 |
 | **P2（已完成）** | 采集完整性（reported_total/observed/is_complete, schema v13）+ 岗位分页 offset | `host/schema.js`、`host/repo/captures.js`、`host/repo/jobs.js`、`host/crawl.js`、`host/routes.js`、`host/tools.js` | 中 |
 | **P3（部分）** | 投递行内推进/快速记录已做；提醒去重、漏斗分时间范围未做 | `host/repo/applications.js`、`client` | 中 |
-| **P4（部分）** | 简历质量检查已做（`career_resume_quality`，10 用例）；三栏工作台 + 版本 Diff UI 未做 | `host/quality.js`、`client` | 中 |
-| **P5（未开始）** | 高层任务工作流 + 工具响应统一 + Client 拆分 | `host/tools.js`、`client/*` | 高：兼容性风险最大 |
+| **P4（已完成核心项）** | 质量检查工具 + `/resume/quality` 路由 + 工作室「开始检查」按钮；三栏并排布局未做（改用分区卡片，窄面板更稳） | `host/quality.js`、`host/routes.js`、`client/index.cjs` | 中 |
+| **P5（已完成核心项）** | 3 个高层任务：`career_find_jobs` / `career_my_progress` / `career_prep_resume`（编排层，不复制逻辑） | `host/workflows.js`、`host/tools.js` | 中 |
+| **P5 剩余** | 工具响应统一适配层、Client 单文件拆分 | — | 高：拆分受 `__ModuleLoader__` 约束，需先验证多文件拼接 |
 
 **执行原则**：每阶段结束必须 183 个测试全绿 + 真实数据验证；不一次性拆掉现有结构。
 

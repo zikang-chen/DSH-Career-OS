@@ -1741,6 +1741,14 @@ function StudioTab({ onChanged }) {
   const [pdfRev, setPdfRev] = useState(0)
   const [compileInfo, setCompileInfo] = useState(null)
 
+  // 简历质量检查（P4）
+  const [quality, setQuality] = useState(null)
+  const [qualityBusy, setQualityBusy] = useState(false)
+  const runQuality = () => {
+    setQualityBusy(true)
+    apiGet('/resume/quality').then(setQuality).catch((err) => setError(err.message)).finally(() => setQualityBusy(false))
+  }
+
   // documents（个人资料库）
   const [docs, setDocs] = useState(null)
   const [docUploading, setDocUploading] = useState(false)
@@ -1965,6 +1973,26 @@ function StudioTab({ onChanged }) {
     : null
 
   const latexView = h('div', { style: S.col },
+    // 简历质量检查：只报可核对的问题，不替你补内容
+    h('div', { style: S.card },
+      h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap' } },
+        h('div', { style: S.h2 }, '简历质量检查'),
+        h(Btn, { kind: 'primary', onClick: runQuality, disabled: qualityBusy }, qualityBusy ? '检查中…' : '开始检查')),
+      h('div', { style: { ...S.muted, marginTop: 4 } },
+        '只列出可核对的问题（缺联系方式、教育缺时间、时间倒挂、技能无依据等），不替你补内容、不评判好坏。'),
+      quality
+        ? h('div', { style: { marginTop: 8 } },
+          h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 6, marginBottom: 6 } },
+            h(Chip, { tone: quality.summary.error ? 'error' : 'success' }, `error ${quality.summary.error}`),
+            h(Chip, { tone: quality.summary.warn ? 'warn' : undefined }, `warn ${quality.summary.warn}`),
+            h(Chip, null, `info ${quality.summary.info}`)),
+          quality.issues.length
+            ? h('div', { style: S.col }, quality.issues.map((iss, i) => h('div', {
+              key: i,
+              style: { ...S.muted, padding: '3px 0', color: iss.level === 'error' ? T.error : iss.level === 'warn' ? T.warn : T.muted },
+            }, `${iss.level === 'error' ? '✕' : iss.level === 'warn' ? '!' : '·'} ${iss.message}`)))
+            : h('div', { style: { ...S.muted, color: T.success } }, '没有发现可核对的问题。'))
+        : null),
     h('div', { style: S.card },
       h('div', { style: S.h2 }, '选择版本'),
       h('div', { style: { ...S.row, flexWrap: 'wrap' } },

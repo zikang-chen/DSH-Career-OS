@@ -10,6 +10,7 @@ import { browserProfileDir, capturePageJson, closeBrowser, findBrowserExecutable
 import { probePortals, resolvePortal } from './portal.js'
 import { fetchJdDetail, resolveJdProvider } from './jd.js'
 import { checkResumeQuality } from './quality.js'
+import { findJobsForMe, prepResumeForJob, summarizeApplications } from './workflows.js'
 import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
@@ -1170,6 +1171,65 @@ export function registerCareerTools(ctx, deps) {
         job,
       })
       return { ok: true, ...result, targetJob: job ? { id: job.id, company: job.company_name, title: job.title } : null }
+    },
+  }))
+
+  // ── 高层任务工作流（把原子工具收敛成常用任务）────────────────────────────
+  add(makeTool({
+    name: 'career_find_jobs',
+    description: '高层任务：帮我找适合的岗位。读画像 → 拉岗位池 → 六维匹配 + 硬性资格 → 输出带理由的推荐排序，并标注哪些岗位 JD 不完整（结论可能偏保守）。',
+    params: {
+      limit: N('返回多少条推荐，默认 10'),
+      city: S('只在某个城市里找（可选）'),
+      type: S('实习类型过滤：daily/summer/winter/long/short/other（可选）'),
+      status: SA('只看这些招聘状态（可选）'),
+    },
+    handler: (args) => {
+      const profile = repos.profile.get()
+      const jobs = repos.jobs.listJobs({
+        limit: 400,
+        location: str(args.city, 100) ?? undefined,
+        internshipType: arr(args.type).length ? arr(args.type) : undefined,
+        status: arr(args.status).length ? arr(args.status) : undefined,
+      }, profile)
+      return { ok: true, ...findJobsForMe({ profile, jobs, limit: Number(args.limit ?? 10) }) }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_my_progress',
+    description: '高层任务：我的投递进展怎么样。汇总投递总数/在流程中、转化漏斗（含卡点）、以及逾期/停滞/有下一步的记录。',
+    params: {},
+    handler: () => {
+      const applications = repos.applications.list({ limit: 1000, includeArchived: false })
+      const events = repos.db.all('SELECT * FROM application_event')
+      return { ok: true, ...summarizeApplications({ applications, events }) }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_prep_resume',
+    description: '高层任务：为这个岗位准备简历。先判断 JD 完整性 → 按岗位挑选/排序经历 → 列缺口 → 做质量检查。只出方案，不编造内容、不生成事实。',
+    params: {
+      jobId: S('目标岗位 id（必填）'),
+      maxEntries: N('最多保留几段经历，默认 6'),
+      bulletsPerEntry: N('每段最多几条要点，默认 3'),
+    },
+    required: ['jobId'],
+    handler: (args) => {
+      const job = repos.jobs.getJob(String(args.jobId))
+      if (!job) throw new Error('岗位不存在')
+      return {
+        ok: true,
+        ...prepResumeForJob({
+          profile: repos.profile.get(),
+          experiences: repos.profile.listExperiences(),
+          documents: repos.profile.listDocuments({}),
+          job,
+          maxEntries: Number(args.maxEntries ?? 6),
+          bulletsPerEntry: Number(args.bulletsPerEntry ?? 3),
+        }),
+      }
     },
   }))
 

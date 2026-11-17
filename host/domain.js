@@ -433,7 +433,7 @@ export function analyzeMatch(profile, job, weightsOverride) {
   const titleText = `${job.title} ${job.department ?? ''}`
   if (companies.some((c) => companyText.includes(c))) {
     interest += 0.5
-    matched.push(`目标企业：${job.companyName}`)
+    matched.push(`目标企业：${jf(job, 'company_name', 'companyName', '') || '命中目标企业'}`)
   }
   if (industries.some((i) => jobText.includes(i) || companyText.includes(i))) interest += 0.3
   if (roles.some((r) => titleText.includes(r) || normKey(titleText).includes(normKey(r)))) {
