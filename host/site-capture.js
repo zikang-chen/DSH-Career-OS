@@ -64,7 +64,7 @@ export async function captureSite(args = {}, deps = {}) {
     fetchNoteBody:(item,opts)=>note(item,{...opts,budget,signal:budget.signal}),
   }).then(result=>({...result,budget:budget.summary()}))
   // 只缓存只读预览；确认入库是单独授权，不能被预览缓存吞掉写操作。
-  if(args.dryRun!==false && !deps.captureJson){const key=JSON.stringify([config?.dataDir,args.site,args.keyword,args.url,args.city,args.recruitType,args.fillJd,args.fillJdLimit,args.bodyLimit]);return boundedResearch(key,run,{force:args.force===true})}
+  if(args.dryRun!==false && !deps.captureJson){const key=JSON.stringify([config?.dataDir,args.site,args.keyword,args.url,args.city,args.recruitType,args.limit,args.fillJd,args.fillJdLimit,args.fillBody,args.bodyLimit,args.useOpenTab,args.company,args.role,args.timeoutMs]);return boundedResearch(key,run,{force:args.force===true})}
   return run()
 }
 async function captureSiteInternal(args = {}, {config,repos,panel,logger,budget,captureJson = capturePageJson,fetchDetail = fetchJdDetail,fetchNoteBody = fetchXhsNoteBody} = {}) {
@@ -184,6 +184,7 @@ async function captureSiteInternal(args = {}, {config,repos,panel,logger,budget,
     let saved=0,duplicate=0,ocrProcessed=0
     const ocrFailures=[]
     for (const it of limited) {
+      budget.check()
       const content=[it.title,it.desc].filter(Boolean).join('\n\n')
       if (!content) continue
       const post=repos.intel.addForumPost({platform:'xiaohongshu',content,url:it.url,title:it.title,author:it.author,publishedAt:it.publishedAt,accessMode:'browser_session'})

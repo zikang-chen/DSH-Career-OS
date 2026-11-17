@@ -1,17 +1,19 @@
 // Today's priorities derived from existing records. User dispositions are append-only feedback events.
 import {assessJobDisplay} from './job360.js'
 import {parseJson} from './util.js'
-const ACTIVE=new Set(['saved','researching','resume_todo','ready','applied','assessment','written_test','interview_1','interview_2','final','hr'])
+import {withJobListEvidence} from './job-list-evidence.js'
+const ACTIVE=new Set(['saved','researching','resume_todo','ready','applied','assessment','written_test','interview_1','interview_2','final','hr','offer'])
 export function buildToday(repos,{now=new Date().toISOString()}={}){
  const profile=repos.profile.getWithResume(),all=repos.jobs.listJobs({limit:500}),apps=repos.applications.list({limit:500}),byJob=new Map(apps.filter(a=>ACTIVE.has(a.status)).map(a=>[a.job_id,a]))
+ const todayLocal=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(now))
  const history=repos.db.all("SELECT subject_id,verdict,note,created_at FROM feedback WHERE subject_type='today_task' ORDER BY created_at DESC")
  const disposition=new Map();for(const h of history)if(!disposition.has(h.subject_id))disposition.set(h.subject_id,h)
  const priorities=[],deadlineMs=Date.parse(now)+7*86400000
  for(const job of all){if(!job.deadline)continue;const due=Date.parse(job.deadline+'T23:59:59+08:00');const app=byJob.get(job.id)
   if(due>=Date.parse(now)&&due<=deadlineMs&&(!app||['saved','researching','resume_todo','ready'].includes(app.status)))priorities.push({id:`deadline:${job.id}:${job.deadline}`,kind:'deadline',priority:'high',title:'申请截止临近',reason:'岗位记录中的截止日期在未来7天内，尚未记录正式投递；日期本身仍需来源核对。',company:job.company_name,jobTitle:job.title,jobId:job.id,dueAt:job.deadline,action:{label:'查看岗位与申请准备',tab:'radar',code:job.id}})
  }
- for(const a of apps)if(ACTIVE.has(a.status)&&a.next_action_at&&a.next_action_at.slice(0,10)<=now.slice(0,10))priorities.push({id:`followup:${a.id}:${a.next_action_at}`,kind:'followup',priority:'high',title:a.next_action||'申请需要跟进',reason:'到达你设置的下一步日期，不代表招聘方已经回复。',company:a.company_name,jobTitle:a.job_title,jobId:a.job_id,applicationId:a.id,dueAt:a.next_action_at,action:{label:'查看申请',tab:'tracker',code:a.job_id}})
- const viewed=all.map(job=>({job,...assessJobDisplay(repos.jobs.getJob(job.id),profile)}))
+ for(const a of apps)if(ACTIVE.has(a.status)&&a.next_action_at&&a.next_action_at.slice(0,10)<=todayLocal)priorities.push({id:`followup:${a.id}:${a.next_action_at}`,kind:'followup',priority:'high',title:a.next_action||'申请需要跟进',reason:'到达你设置的下一步日期，不代表招聘方已经回复。',company:a.company_name,jobTitle:a.job_title,jobId:a.job_id,applicationId:a.id,dueAt:a.next_action_at,action:{label:'查看申请',tab:'tracker',code:a.job_id}})
+ const viewed=withJobListEvidence(repos,all).map(job=>({job,...assessJobDisplay(job,profile)}))
  for(const row of viewed.filter(r=>byJob.has(r.job.id)&&!r.assessment.evidence.textComplete).slice(0,3))priorities.push({id:`jd:${row.job.id}`,kind:'data_gap',priority:'normal',title:'收藏岗位缺少完整JD',reason:'职责或要求尚缺，暂不能形成可靠申请方案。',company:row.job.company_name,jobTitle:row.job.title,jobId:row.job.id,dueAt:null,action:{label:'补齐岗位资料',tab:'radar',code:row.job.id}})
  const visible=priorities.filter(p=>{const d=disposition.get(p.id);if(!d)return true;if(d.verdict==='done'||d.verdict==='ignore')return false;if(d.verdict==='snooze'){const n=parseJson(d.note,{});return !n.until||n.until<=now}return true}).sort((a,b)=>(a.priority==='high'?-1:1)-(b.priority==='high'?-1:1)||String(a.dueAt??'9999').localeCompare(String(b.dueAt??'9999'))).slice(0,5)
  const candidates=viewed.filter(r=>!['verified_closed'].includes(r.assessment.evidence.statusAssessment)&&!byJob.has(r.job.id))

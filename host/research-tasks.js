@@ -2,13 +2,13 @@
 import {createHash}from'node:crypto'
 import {ResearchBudget}from'./research-budget.js'
 import {captureSite}from'./site-capture.js'
-const running=new Map(),results=new Map()
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex')
 export function createResearchTasks(deps,{capture=captureSite}={}){
  const {repos,panel}=deps
+ const running=new Map(),results=new Map()
  return {
   start(args={}){
-   const key=digest([deps.config.dataDir,args.site,args.keyword,args.city,args.recruitType,args.dryRun!==false,args.limit,args.fillJdLimit,args.bodyLimit,args.autoOcr])
+   const key=digest([deps.config.dataDir,args.site,args.keyword,args.url,args.city,args.recruitType,args.dryRun!==false,args.limit,args.fillJd,args.fillJdLimit,args.fillBody,args.bodyLimit,args.autoOcr,args.useOpenTab,args.force,args.company,args.role,args.timeoutMs])
    const existing=[...running.values()].find(t=>t.key===key)
    if(existing)return {ok:true,id:existing.id,duplicate:true,status:'running'}
    const id=repos.monitor.startRun('research_task',args.site??'unknown'),controller=new AbortController()

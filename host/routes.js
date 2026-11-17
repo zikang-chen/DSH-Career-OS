@@ -24,6 +24,7 @@ import {assessJob360} from './assessment.js'
 import {buildJob360,assessJobDisplay} from './job360.js'
 import {buildToday,updateTodayTask} from './today.js'
 import {createResearchTasks} from './research-tasks.js'
+import {withJobListEvidence} from './job-list-evidence.js'
 import { capturePageJson, openForLogin } from './browser.js'
 import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
@@ -156,14 +157,14 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
       limit: Number(query.get('limit') ?? 100),
       offset: Number(query.get('offset') ?? 0),
     })
-    const rows=page.items
+    const rows=withJobListEvidence(repos,page.items)
     return {
       ok: true,
       total:page.total,limit:page.limit,offset:page.offset,
       count: rows.length,
       scope: '仅本地已入库岗位；未访问第三方招聘平台',
       jobs: rows.map((j) => ({
-        ...assessJobDisplay(repos.jobs.getJob(j.id),profile),
+        ...assessJobDisplay(j,profile),
         id: j.id, company: j.company_name, companyId: j.company_id, title: j.title,
         location: j.location, department: j.department, internshipType: j.internship_type,
         internshipLabel: j.internship_type, status: j.status, statusLabel: STATUS_LABEL[j.status] ?? j.status,
