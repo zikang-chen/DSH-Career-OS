@@ -1,0 +1,2050 @@
+// CareerOS dashboard — client half of the bundle.
+//
+// Plain JavaScript on purpose: this file is wrapped into the DSH "wrapped module"
+// format by scripts/build-client.mjs, so no JSX/bundler step is needed. React and
+// react-dom arrive through the host module table via `require`.
+const React = require('react')
+const { createPortal } = require('react-dom')
+
+const h = React.createElement
+const { useCallback, useEffect, useMemo, useRef, useState } = React
+
+const API = '/plugins/dsh-career/api'
+
+// ─── theme ───────────────────────────────────────────────────────────────────
+const V = (name, fallback) => `var(${name}, ${fallback})`
+const T = {
+  bg: V('--dsw-alias-bg-base', '#ffffff'),
+  surface: V('--dsw-alias-bg-layer-1', '#f7f8fa'),
+  surface2: V('--dsw-alias-bg-layer-2', '#eef0f3'),
+  overlay: V('--dsw-alias-bg-overlay', '#ffffff'),
+  border: V('--dsw-alias-border-l1', '#e3e5e8'),
+  border2: V('--dsw-alias-border-l2', '#cfd3d8'),
+  text: V('--dsw-alias-label-primary', '#111827'),
+  muted: V('--dsw-alias-label-secondary', '#6b7280'),
+  accent: V('--dsw-alias-brand-primary', '#2563eb'),
+  error: V('--dsw-alias-state-error-primary', '#dc2626'),
+  warn: V('--dsw-alias-state-warn-primary', '#d97706'),
+  success: V('--dsw-alias-state-success-primary', '#059669'),
+  idle: V('--dsw-alias-state-idle-primary', '#9ca3af'),
+}
+
+const S = {
+  card: { background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: 14 },
+  cardTight: { background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, padding: 10 },
+  h1: { margin: 0, fontSize: 17, fontWeight: 650, color: T.text, letterSpacing: 0.2 },
+  h2: { margin: '0 0 8px', fontSize: 14, fontWeight: 600, color: T.text },
+  h3: { margin: '0 0 6px', fontSize: 13, fontWeight: 600, color: T.text },
+  body: { fontSize: 13, lineHeight: 1.6, color: T.text },
+  muted: { fontSize: 12, lineHeight: 1.55, color: T.muted },
+  mono: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 11, color: T.muted },
+  row: { display: 'flex', alignItems: 'center', gap: 8 },
+  col: { display: 'flex', flexDirection: 'column', gap: 10 },
+  grid: (min) => ({ display: 'grid', gridTemplateColumns: `repeat(auto-fill, minmax(${min}px, 1fr))`, gap: 10 }),
+  input: {
+    width: '100%', boxSizing: 'border-box', padding: '7px 9px', fontSize: 13, fontFamily: 'inherit',
+    color: T.text, background: T.overlay, border: `1px solid ${T.border}`, borderRadius: 8, outline: 'none',
+  },
+  textarea: {
+    width: '100%', boxSizing: 'border-box', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit',
+    color: T.text, background: T.overlay, border: `1px solid ${T.border}`, borderRadius: 8,
+    minHeight: 78, resize: 'vertical', outline: 'none', lineHeight: 1.55,
+  },
+  btn: (kind) => ({
+    appearance: 'none', cursor: 'pointer', fontFamily: 'inherit', fontSize: 12.5, fontWeight: 550,
+    padding: '7px 12px', borderRadius: 8, border: `1px solid ${kind === 'primary' ? T.accent : T.border}`,
+    background: kind === 'primary' ? T.accent : kind === 'ghost' ? 'transparent' : T.overlay,
+    color: kind === 'primary' ? '#fff' : T.text, whiteSpace: 'nowrap',
+  }),
+  chip: (tone) => ({
+    display: 'inline-flex', alignItems: 'center', gap: 4, padding: '1px 7px', borderRadius: 999,
+    fontSize: 11, fontWeight: 550, lineHeight: 1.7, whiteSpace: 'nowrap',
+    color: tone === 'error' ? T.error : tone === 'warn' ? T.warn : tone === 'success' ? T.success : tone === 'accent' ? T.accent : T.muted,
+    background: tone === 'error' ? 'rgba(220,38,38,0.10)' : tone === 'warn' ? 'rgba(217,119,6,0.12)' : tone === 'success' ? 'rgba(5,150,105,0.12)' : tone === 'accent' ? 'rgba(37,99,235,0.12)' : 'rgba(107,114,128,0.12)',
+    border: '1px solid transparent',
+  }),
+}
+
+// ─── api ─────────────────────────────────────────────────────────────────────
+async function apiGet(path) {
+  const res = await fetch(`${API}${path}`, { headers: { accept: 'application/json' } })
+  const text = await res.text()
+  let data
+  try {
+    data = JSON.parse(text)
+  } catch {
+    throw new Error(`接口返回异常（HTTP ${res.status}）：${text.slice(0, 160)}`)
+  }
+  if (!res.ok || data.ok === false) throw new Error(data.error || `请求失败 HTTP ${res.status}`)
+  return data
+}
+
+async function apiPost(path, body) {
+  const res = await fetch(`${API}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  })
+  const text = await res.text()
+  let data
+  try {
+    data = JSON.parse(text)
+  } catch {
+    throw new Error(`接口返回异常（HTTP ${res.status}）：${text.slice(0, 160)}`)
+  }
+  if (!res.ok || data.ok === false) throw new Error(data.error || `请求失败 HTTP ${res.status}`)
+  return data
+}
+
+function useApi(path, deps) {
+  const [state, setState] = useState({ loading: true, error: null, data: null })
+  const reload = useCallback(() => {
+    let alive = true
+    setState((prev) => ({ ...prev, loading: true, error: null }))
+    apiGet(path)
+      .then((data) => alive && setState({ loading: false, error: null, data }))
+      .catch((err) => alive && setState({ loading: false, error: err.message, data: null }))
+    return () => {
+      alive = false
+    }
+  }, [path])
+  useEffect(reload, [path, ...(deps ?? [])])
+  return { ...state, reload }
+}
+
+// ─── primitives ──────────────────────────────────────────────────────────────
+function Chip({ tone, children }) {
+  return h('span', { style: S.chip(tone) }, children)
+}
+
+function Btn({ kind, onClick, children, disabled, title }) {
+  return h('button', { type: 'button', title, disabled, onClick, style: { ...S.btn(kind), opacity: disabled ? 0.5 : 1, cursor: disabled ? 'default' : 'pointer' } }, children)
+}
+
+function Field({ label, hint, children }) {
+  return h('label', { style: { ...S.col, gap: 4 } },
+    h('span', { style: { ...S.muted, fontWeight: 550 } }, label),
+    children,
+    hint ? h('span', { style: { ...S.muted, fontSize: 11, opacity: 0.8 } }, hint) : null)
+}
+
+function Empty({ title, hint, action }) {
+  return h('div', { style: { ...S.card, textAlign: 'center', padding: 26, color: T.muted } },
+    h('div', { style: { fontSize: 13, fontWeight: 600, color: T.text, marginBottom: 6 } }, title),
+    hint ? h('div', { style: S.muted }, hint) : null,
+    action ? h('div', { style: { marginTop: 12 } }, action) : null)
+}
+
+function Loading({ label }) {
+  return h('div', { style: { ...S.muted, padding: 18, display: 'flex', alignItems: 'center', gap: 8 } },
+    h('span', { style: { width: 12, height: 12, borderRadius: 999, border: `2px solid ${T.border2}`, borderTopColor: T.accent, animation: 'careeros-spin 0.8s linear infinite' } }),
+    label ?? '加载中…')
+}
+
+function ErrorBox({ error, onRetry }) {
+  return h('div', { style: { ...S.card, borderColor: T.error } },
+    h('div', { style: { ...S.h3, color: T.error } }, '加载失败'),
+    h('div', { style: S.muted }, error),
+    onRetry ? h('div', { style: { marginTop: 10 } }, h(Btn, { onClick: onRetry }, '重试')) : null)
+}
+
+function statusTone(status) {
+  if (status === 'OPEN') return 'success'
+  if (status === 'CLOSED') return 'error'
+  if (status === 'UPCOMING') return 'accent'
+  if (status === 'STALE') return 'warn'
+  return undefined
+}
+
+function fmtDate(value) {
+  if (!value) return '—'
+  return String(value).slice(0, 10)
+}
+
+function relTime(iso) {
+  if (!iso) return '—'
+  const diff = Date.now() - Date.parse(iso)
+  if (Number.isNaN(diff)) return String(iso).slice(0, 16)
+  const min = Math.round(diff / 60000)
+  if (min < 1) return '刚刚'
+  if (min < 60) return `${min} 分钟前`
+  const hours = Math.round(min / 60)
+  if (hours < 24) return `${hours} 小时前`
+  return `${Math.round(hours / 24)} 天前`
+}
+
+function Bar({ value, max = 100, tone }) {
+  const pct = Math.max(0, Math.min(100, (Number(value) / max) * 100))
+  return h('div', { style: { height: 6, borderRadius: 999, background: T.surface2, overflow: 'hidden' } },
+    h('div', { style: { width: `${pct}%`, height: '100%', background: tone ?? T.accent, borderRadius: 999 } }))
+}
+
+function Score({ value }) {
+  if (value === null || value === undefined) return h('span', { style: S.muted }, '未评分')
+  const tone = value >= 80 ? T.success : value >= 65 ? T.accent : value >= 50 ? T.warn : T.muted
+  return h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
+    h('span', { style: { fontSize: 13, fontWeight: 700, color: tone } }, String(value)),
+    h('span', { style: { width: 44 } }, h(Bar, { value, tone })))
+}
+
+// ─── global styles (mounted once by the panel) ───────────────────────────────
+function GlobalStyles() {
+  return h('style', null, `
+@keyframes careeros-spin { to { transform: rotate(360deg) } }
+.careeros-root * { box-sizing: border-box }
+.careeros-root input:focus, .careeros-root textarea:focus, .careeros-root select:focus { border-color: ${T.accent} }
+.careeros-root ::-webkit-scrollbar { width: 9px; height: 9px }
+.careeros-root ::-webkit-scrollbar-thumb { background: ${T.border2}; border-radius: 8px }
+.careeros-nav button { text-align: left; width: 100% }
+`)
+}
+
+// ─── backend status helper ───────────────────────────────────────────────────
+function useBackend() {
+  const [state, setState] = useState({ ok: null, error: null, busy: false })
+  const call = useCallback(async (fn) => {
+    setState((s) => ({ ...s, busy: true }))
+    try {
+      const result = await fn()
+      setState({ ok: true, error: null, busy: false })
+      return result
+    } catch (err) {
+      setState({ ok: false, error: err.message, busy: false })
+      throw err
+    }
+  }, [])
+  return { ...state, call, setError: (error) => setState({ ok: false, error, busy: false }) }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Tabs
+// ═════════════════════════════════════════════════════════════════════════════
+
+function OverviewTab({ bootstrap, onNavigate, onRefresh }) {
+  if (!bootstrap) return h(Loading)
+  // `/bootstrap` nests jobStats / applicationStats / unreadNotifications inside
+  // `digest`, and any of them can be missing on a partial payload. Read defensively:
+  // an undefined read here used to throw and take the whole panel down.
+  const dig = bootstrap.digest ?? {}
+  const jobStats = dig.jobStats ?? {}
+  const applicationStats = dig.applicationStats ?? {}
+  const closing = dig.closing ?? []
+  const newlyFound = dig.newlyFound ?? []
+  const follow = dig.followUps ?? {}
+  const completeness = bootstrap.completeness ?? { checks: [], done: 0, total: 0, percent: 0 }
+  const checks = completeness.checks ?? []
+  const done = completeness.done ?? 0
+  const total = completeness.total ?? 0
+  const percent = completeness.percent ?? 0
+  const notifications = bootstrap.notifications ?? []
+  const status = bootstrap.status ?? {}
+  const db = status.db ?? {}
+  const activeResume = bootstrap.activeResume ?? null
+  const focus = bootstrap.focus ?? null
+  const cards = [
+    { label: '在库岗位', value: jobStats.total ?? 0, hint: '只统计本机数据库' },
+    { label: '官方确认在招', value: (jobStats.byStatus ?? {}).OPEN ?? 0, hint: '需近期核验过' },
+    { label: '投递记录', value: applicationStats.total ?? 0, hint: '含全部阶段' },
+    { label: '未读提醒', value: dig.unreadNotifications ?? 0, hint: '来自监控规则' },
+  ]
+  return h('div', { style: S.col },
+    focus && focus.note ? h('div', { style: { ...S.cardTight, borderColor: T.accent, background: 'rgba(37,99,235,0.06)' } },
+      h('div', { style: { ...S.body, fontWeight: 550 } }, `Agent 提示：${focus.note}`),
+      focus.code ? h('div', { style: S.mono }, `聚焦对象 ${focus.code}`) : null) : null,
+
+    h('div', { style: S.grid(170) }, cards.map((c) => h('div', { key: c.label, style: S.card },
+      h('div', { style: { ...S.muted, fontSize: 11.5 } }, c.label),
+      h('div', { style: { fontSize: 22, fontWeight: 700, color: T.text, margin: '2px 0' } }, String(c.value ?? 0)),
+      h('div', { style: { ...S.muted, fontSize: 11 } }, c.hint)))),
+
+    h('div', { style: S.grid(300) },
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, '引导完成度'),
+        h('div', { style: { ...S.row, justifyContent: 'space-between', marginBottom: 6 } },
+          h('span', { style: S.body }, `${done}/${total}`),
+          h(Chip, { tone: percent >= 70 ? 'success' : 'warn' }, `${percent}%`)),
+        h(Bar, { value: percent, tone: percent >= 70 ? T.success : T.warn }),
+        h('div', { style: { ...S.col, gap: 4, marginTop: 10 } },
+          checks.map((c) => h('div', { key: c.key, style: { ...S.row, gap: 6, ...S.muted } },
+            h('span', { style: { color: c.done ? T.success : T.muted, width: 12 } }, c.done ? '✓' : '○'),
+            h('span', null, c.label)))),
+        percent < 100
+          ? h('div', { style: { marginTop: 10 } }, h(Btn, { kind: 'primary', onClick: () => onNavigate('resume') }, '去完善画像'))
+          : null),
+
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, '今日待办'),
+        (closing.length || follow.overdue || follow.interviews)
+          ? h('div', { style: S.col },
+            follow.overdue ? h('div', { style: S.row },
+              h(Chip, { tone: 'warn' }, '逾期'), h('span', { style: S.body }, `${follow.overdue} 个投递待跟进`)) : null,
+            follow.interviews ? h('div', { style: S.row },
+              h(Chip, { tone: 'accent' }, '面试'), h('span', { style: S.body }, `${follow.interviews} 个岗位进入面试阶段`)) : null,
+            closing.slice(0, 5).map((job) => h('div', { key: job.id, style: { ...S.row, justifyContent: 'space-between', gap: 6 } },
+              h('span', { style: { ...S.body, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${job.company_name} · ${job.title}`),
+              h(Chip, { tone: job.daysLeft <= 2 ? 'error' : 'warn' }, `${job.daysLeft} 天`))))
+          : h('div', { style: S.muted }, '暂无紧急事项。'),
+
+        h('div', { style: { ...S.h2, marginTop: 14 } }, '最近发现的岗位'),
+        newlyFound.length
+          ? h('div', { style: S.col }, newlyFound.slice(0, 5).map((j) => h('div', { key: j.id, style: { ...S.row, justifyContent: 'space-between', gap: 6 } },
+            h('span', { style: { ...S.body, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, `${j.company_name} · ${j.title}`),
+            h(Chip, null, j.location || '地点未知'))))
+          : h('div', { style: S.muted }, '还没有新岗位。去「岗位雷达」粘贴 JD，或在「设置」登记官方招聘页。')),
+
+      h('div', { style: S.card },
+        h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+          h('div', { style: S.h2 }, '提醒'),
+          h(Btn, { kind: 'ghost', onClick: onRefresh }, '刷新')),
+        notifications.length
+          ? h('div', { style: S.col }, notifications.slice(0, 8).map((n) => h('div', { key: n.id, style: S.cardTight },
+            h('div', { style: { ...S.row, justifyContent: 'space-between', gap: 6 } },
+              h('span', { style: { ...S.body, fontWeight: 600 } }, n.title),
+              h(Chip, { tone: n.severity === 'high' ? 'error' : n.severity === 'low' ? undefined : 'warn' }, relTime(n.created_at))),
+            n.body ? h('div', { style: { ...S.muted, marginTop: 4, whiteSpace: 'pre-wrap' } }, n.body) : null,
+            n.action ? h('div', { style: { ...S.muted, marginTop: 4, color: T.accent } }, `建议：${n.action}`) : null)))
+          : h('div', { style: S.muted }, '暂无提醒。监控规则触发后会出现在这里。')),
+
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, '系统状态'),
+        h('div', { style: { ...S.col, gap: 5 } },
+          h('div', { style: { ...S.row, justifyContent: 'space-between' } }, h('span', { style: S.muted }, '数据库'), h('span', { style: S.mono }, `schema v${db.schemaVersion ?? '?'} · ${db.ftsMode ?? '?'}`)),
+          h('div', { style: { ...S.row, justifyContent: 'space-between' } }, h('span', { style: S.muted }, '数据目录'), h('span', { style: { ...S.mono, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, status.dataDir)),
+          h('div', { style: { ...S.row, justifyContent: 'space-between' } }, h('span', { style: S.muted }, '定时监控'), h(Chip, { tone: status.scheduleEnabled ? 'success' : undefined }, status.scheduleEnabled ? '已开启' : '关闭（手动触发）')),
+          h('div', { style: { ...S.row, justifyContent: 'space-between' } }, h('span', { style: S.muted }, '当前简历'), h('span', { style: S.body }, activeResume ? activeResume.label : '未导入')))),
+    ))
+}
+
+// ─── Resume Studio ───────────────────────────────────────────────────────────
+function ResumeTab({ bootstrap, onChanged }) {
+  const backend = useBackend()
+  const [path, setPath] = useState('')
+  const [text, setText] = useState('')
+  const [label, setLabel] = useState('')
+  const [proposal, setProposal] = useState(null)
+  const [compare, setCompare] = useState(null)
+  const [aId, setAId] = useState('')
+  const [bId, setBId] = useState('')
+  const [profileForm, setProfileForm] = useState(null)
+
+  useEffect(() => {
+    if (bootstrap && !profileForm) {
+      const p = bootstrap.profile
+      setProfileForm({
+        displayName: p.display_name ?? '', headline: p.headline ?? '', school: p.school ?? '', degree: p.degree ?? '',
+        major: p.major ?? '', gradYear: p.grad_year ?? '', availabilityStart: p.availability_start ?? '',
+        weeklyDays: p.weekly_days ?? '', cities: (p.cities ?? []).join('，'),
+        targetIndustries: (p.target_industries ?? []).join('，'), targetRoles: (p.target_roles ?? []).join('，'),
+        targetCompanies: (p.target_companies ?? []).join('，'), excluded: (p.excluded ?? []).join('，'),
+      })
+    }
+  }, [bootstrap, profileForm])
+
+  const resumes = bootstrap?.resumes ?? []
+
+  const doImport = async () => {
+    if (!path.trim() && !text.trim()) return backend.setError('请填写文件路径或粘贴简历文本')
+    await backend.call(() => apiPost('/resume/import', { path: path.trim() || undefined, text: text.trim() || undefined, label: label.trim() || undefined }))
+      .then((res) => {
+        setProposal(res)
+        onChanged()
+      })
+      .catch(() => {})
+  }
+
+  const saveProfile = async () => {
+    const payload = {
+      displayName: profileForm.displayName, headline: profileForm.headline, school: profileForm.school,
+      degree: profileForm.degree, major: profileForm.major,
+      gradYear: profileForm.gradYear === '' ? null : Number(profileForm.gradYear),
+      availabilityStart: profileForm.availabilityStart,
+      weeklyDays: profileForm.weeklyDays === '' ? null : Number(profileForm.weeklyDays),
+      cities: profileForm.cities, targetIndustries: profileForm.targetIndustries,
+      targetRoles: profileForm.targetRoles, targetCompanies: profileForm.targetCompanies,
+      excluded: profileForm.excluded,
+    }
+    await backend.call(() => apiPost('/profile', payload)).then(() => onChanged()).catch(() => {})
+  }
+
+  const set = (key) => (ev) => setProfileForm((prev) => ({ ...prev, [key]: ev.target.value }))
+
+  return h('div', { style: S.col },
+    backend.error ? h(ErrorBox, { error: backend.error, onRetry: () => backend.setError(null) }) : null,
+
+    h('div', { style: S.grid(340) },
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, '导入简历'),
+        h('div', { style: { ...S.muted, marginBottom: 8 } }, '支持 .md / .txt / .docx / .pdf。解析结果只是「候选」，确认后才会写入画像。'),
+        h('div', { style: S.col, gap: 8 },
+          h(Field, { label: '文件绝对路径', hint: '例如 D:\\career_os\\resume.pdf（由 Host 本机读取）' },
+            h('input', { style: S.input, value: path, onChange: (e) => setPath(e.target.value), placeholder: 'D:\\...\\简历.docx' })),
+          h(Field, { label: '或直接粘贴简历全文', hint: 'PDF 是扫描件或 CID 字体时用这个' },
+            h('textarea', { style: { ...S.textarea, minHeight: 110 }, value: text, onChange: (e) => setText(e.target.value), placeholder: '在这里粘贴简历文本…' })),
+          h(Field, { label: '版本标签（可选）' }, h('input', { style: S.input, value: label, onChange: (e) => setLabel(e.target.value), placeholder: '产品方向-v1' })),
+          h(Btn, { kind: 'primary', disabled: backend.busy, onClick: doImport }, backend.busy ? '解析中…' : '导入并解析'))),
+
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, '简历版本'),
+        resumes.length
+          ? h('div', { style: S.col }, resumes.map((r) => h('div', { key: r.id, style: { ...S.cardTight, ...S.row, justifyContent: 'space-between' } },
+            h('div', { style: { ...S.col, gap: 2, minWidth: 0 } },
+              h('div', { style: { ...S.body, fontWeight: 600, display: 'flex', gap: 6, alignItems: 'center' } },
+                r.label, r.is_active ? h(Chip, { tone: 'success' }, '当前') : null),
+              h('div', { style: S.mono }, `${r.parse_status} · ${r.text_length ?? 0} 字符 · ${fmtDate(r.created_at)}`)),
+            h('div', { style: S.row },
+              r.is_active ? null : h(Btn, { kind: 'ghost', onClick: () => backend.call(() => apiPost('/resume/activate', { id: r.id })).then(() => onChanged()).catch(() => {}) }, '设为当前'),
+              h(Btn, { kind: 'ghost', onClick: () => { setAId(bId || r.id); setBId(r.id) } }, '对比')))))
+          : h(Empty, { title: '还没有简历', hint: '导入一份简历后，系统才能做岗位匹配与缺口分析。' }),
+
+        resumes.length >= 2
+          ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+            h('div', { style: S.h3 }, '版本对比'),
+            h('div', { style: { ...S.row, flexWrap: 'wrap' } },
+              h('select', { style: { ...S.input, width: 130 }, value: aId, onChange: (e) => setAId(e.target.value) },
+                h('option', { value: '' }, 'A 版本'),
+                resumes.map((r) => h('option', { key: r.id, value: r.id }, r.label))),
+              h('select', { style: { ...S.input, width: 130 }, value: bId, onChange: (e) => setBId(e.target.value) },
+                h('option', { value: '' }, 'B 版本'),
+                resumes.map((r) => h('option', { key: r.id, value: r.id }, r.label))),
+              h(Btn, { onClick: () => aId && bId && backend.call(() => apiPost('/resume/compare', { aId, bId })).then(setCompare).catch(() => {}) }, '比较')),
+            compare ? h('div', { style: { marginTop: 8, ...S.col, gap: 4 } },
+              h('div', { style: { ...S.muted, color: T.success } }, `新增 ${compare.added.length} 行`),
+              compare.added.slice(0, 6).map((line, i) => h('div', { key: `a${i}`, style: { ...S.mono, color: T.success } }, `+ ${line.slice(0, 90)}`)),
+              h('div', { style: { ...S.muted, color: T.error, marginTop: 6 } }, `删除 ${compare.removed.length} 行`),
+              compare.removed.slice(0, 6).map((line, i) => h('div', { key: `r${i}`, style: { ...S.mono, color: T.error } }, `- ${line.slice(0, 90)}`))) : null)
+          : null),
+
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, '个人画像'),
+        h('div', { style: { ...S.muted, marginBottom: 8 } }, '留空即「未知」，系统不会替你补全；所有数据只存在本机。'),
+        profileForm ? h('div', { style: S.grid(150) },
+          h(Field, { label: '姓名' }, h('input', { style: S.input, value: profileForm.displayName, onChange: set('displayName') })),
+          h(Field, { label: '一句话定位' }, h('input', { style: S.input, value: profileForm.headline, onChange: set('headline') })),
+          h(Field, { label: '学校' }, h('input', { style: S.input, value: profileForm.school, onChange: set('school') })),
+          h(Field, { label: '学历' }, h('input', { style: S.input, value: profileForm.degree, onChange: set('degree') })),
+          h(Field, { label: '专业' }, h('input', { style: S.input, value: profileForm.major, onChange: set('major') })),
+          h(Field, { label: '毕业年份' }, h('input', { style: S.input, value: profileForm.gradYear, onChange: set('gradYear'), placeholder: '2027' })),
+          h(Field, { label: '可实习开始' }, h('input', { style: S.input, type: 'date', value: profileForm.availabilityStart, onChange: set('availabilityStart') })),
+          h(Field, { label: '每周出勤天数' }, h('input', { style: S.input, value: profileForm.weeklyDays, onChange: set('weeklyDays'), placeholder: '4' })),
+          h(Field, { label: '目标城市（逗号分隔）' }, h('input', { style: S.input, value: profileForm.cities, onChange: set('cities'), placeholder: '北京，上海' })),
+          h(Field, { label: '目标行业' }, h('input', { style: S.input, value: profileForm.targetIndustries, onChange: set('targetIndustries') })),
+          h(Field, { label: '目标岗位' }, h('input', { style: S.input, value: profileForm.targetRoles, onChange: set('targetRoles') })),
+          h(Field, { label: '目标企业' }, h('input', { style: S.input, value: profileForm.targetCompanies, onChange: set('targetCompanies') })),
+          h(Field, { label: '排除条件' }, h('input', { style: S.input, value: profileForm.excluded, onChange: set('excluded'), placeholder: '销售，单休' })))
+          : h(Loading),
+        h('div', { style: { marginTop: 10 } }, h(Btn, { kind: 'primary', disabled: backend.busy, onClick: saveProfile }, '保存画像')),
+
+        (bootstrap?.skills ?? []).length
+          ? h('div', { style: { marginTop: 12 } },
+            h('div', { style: S.h3 }, `技能矩阵（${bootstrap.skills.length}）`),
+            h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 6 } },
+              bootstrap.skills.map((s) => h(Chip, { key: s.id, tone: s.verified ? 'success' : undefined }, `${s.name}${s.verified ? ' ✓' : ''}`))))
+          : null)),
+
+      proposal
+        ? h('div', { style: S.card },
+          h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+            h('div', { style: S.h2 }, '解析结果（需要你确认）'),
+            h(Chip, { tone: proposal.proposal.confidence >= 0.5 ? 'accent' : 'warn' }, `识别率 ${Math.round((proposal.proposal.confidence ?? 0) * 100)}%`)),
+          h('div', { style: { ...S.muted, marginBottom: 8 } }, proposal.proposal.caveat),
+          h('div', { style: S.grid(200) },
+            h('div', { style: S.cardTight }, h('div', { style: S.h3 }, '教育'), proposal.proposal.education.length
+              ? proposal.proposal.education.map((e, i) => h('div', { key: i, style: S.body }, [e.school, e.degree, e.major, e.gradYear].filter(Boolean).join(' · ')))
+              : h('div', { style: S.muted }, '未识别')),
+            h('div', { style: S.cardTight }, h('div', { style: S.h3 }, `技能（${proposal.proposal.skills.length}）`),
+              h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 4 } }, proposal.proposal.skills.map((s) => h(Chip, { key: s }, s)))),
+            h('div', { style: S.cardTight }, h('div', { style: S.h3 }, `实习经历（${proposal.proposal.experience.length}）`),
+              proposal.proposal.experience.length
+                ? proposal.proposal.experience.map((e, i) => h('div', { key: i, style: { ...S.muted, marginBottom: 4 } }, `${e.organization ?? '机构未识别'} · ${e.role}`))
+                : h('div', { style: S.muted }, '未识别到实习段落')),
+            h('div', { style: S.cardTight }, h('div', { style: S.h3 }, '解析提醒'), proposal.proposal.notes.length
+              ? proposal.proposal.notes.map((n, i) => h('div', { key: i, style: { ...S.muted, marginBottom: 3 } }, `· ${n}`))
+              : h('div', { style: S.muted }, '无'))),
+          h('div', { style: { ...S.row, marginTop: 10 } },
+            h(Btn, {
+              kind: 'primary',
+              onClick: () => backend.call(() => apiPost('/profile', proposal.suggestedProfilePatch)).then(() => { setProposal(null); onChanged() }).catch(() => {}),
+            }, '把解析结果写入画像'),
+            h(Btn, { kind: 'ghost', onClick: () => setProposal(null) }, '稍后再说')))
+        : null)
+}
+
+// ─── Internship Radar ────────────────────────────────────────────────────────
+function RadarTab({ focusCode, onChanged }) {
+  const [query, setQuery] = useState('')
+  const [status, setStatus] = useState('')
+  const [minScore, setMinScore] = useState('')
+  const [list, setList] = useState(null)
+  const [selected, setSelected] = useState(null)
+  const [detail, setDetail] = useState(null)
+  const [form, setForm] = useState({ company: '', title: '', jdText: '', url: '', official: false })
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState(null)
+  const [crawlUrl, setCrawlUrl] = useState('')
+  const [crawlCompany, setCrawlCompany] = useState('')
+  const [crawlRecruit, setCrawlRecruit] = useState('')
+  const [crawlResult, setCrawlResult] = useState(null)
+  const [crawling, setCrawling] = useState(false)
+
+  const load = useCallback(() => {
+    const params = new URLSearchParams()
+    if (query) params.set('query', query)
+    if (status) params.set('status', status)
+    if (minScore) params.set('minScore', minScore)
+    params.set('limit', '120')
+    setError(null)
+    apiGet(`/jobs?${params.toString()}`).then(setList).catch((err) => setError(err.message))
+  }, [query, status, minScore])
+
+  useEffect(load, [load])
+
+  const openDetail = useCallback((id) => {
+    setSelected(id)
+    setDetail(null)
+    apiGet(`/job?id=${encodeURIComponent(id)}`).then((res) => setDetail(res.job)).catch((err) => setError(err.message))
+  }, [])
+
+  useEffect(() => {
+    if (focusCode) openDetail(focusCode)
+  }, [focusCode, openDetail])
+
+  const saveJob = async () => {
+    if (!form.company.trim() || !form.title.trim()) return setError('公司与岗位名必填')
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await apiPost('/job/save', form)
+      setForm({ company: '', title: '', jdText: '', url: '', official: false })
+      load()
+      onChanged?.()
+      if (res.job?.id) openDetail(res.job.id)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const verify = async (nextStatus, official) => {
+    if (!selected) return
+    try {
+      await apiPost('/job/verify', { id: selected, status: nextStatus, official })
+      openDetail(selected)
+      load()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const track = async () => {
+    if (!detail) return
+    try {
+      await apiPost('/application', { jobId: detail.id, status: 'saved', channel: '官网' })
+      onChanged?.()
+      openDetail(detail.id)
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const listBody = list === null
+    ? h(Loading)
+    : list.jobs.length === 0
+      ? h(Empty, { title: '没有符合条件的结果', hint: '换个关键词，或先保存/同步岗位。空白默认表示「未筛选」，不是「没有岗位」。' })
+      : h('div', { style: S.col }, list.jobs.map((job) => h('div', {
+          key: job.id,
+          onClick: () => openDetail(job.id),
+          style: {
+            ...S.cardTight,
+            cursor: 'pointer',
+            borderColor: selected === job.id ? T.accent : T.border,
+            background: selected === job.id ? 'rgba(37,99,235,0.05)' : T.surface,
+          },
+        },
+          h('div', { style: { ...S.row, justifyContent: 'space-between', gap: 8 } },
+            h('div', { style: { ...S.col, gap: 2, minWidth: 0 } },
+              h('div', { style: { ...S.body, fontWeight: 600 } }, `${job.company} · ${job.title}`),
+              h('div', { style: { ...S.muted } }, [job.location || '地点未知', job.department, `截止 ${fmtDate(job.deadline)}`].filter(Boolean).join(' · '))),
+            h('div', { style: { ...S.row, gap: 6 } },
+              h(Chip, { tone: statusTone(job.status) }, job.statusLabel),
+              h(Score, { value: job.matchScore }))),
+        )))
+
+  return h('div', { style: S.col },
+    error ? h('div', { style: { ...S.card, borderColor: T.error, ...S.muted, color: T.error } }, error) : null,
+
+    h('div', { style: S.card },
+      h('div', { style: S.h2 }, '从招聘页批量抓取（秋招/校招）'),
+      h('div', { style: { ...S.muted, marginBottom: 8 } },
+        '贴上公司校招/社招列表页地址，系统会解析 JSON-LD、页面内嵌数据或岗位链接，自动带出岗位名、工作地点、投递地址与截止日期。先预览再入库。只抓 robots.txt 允许的公开页面；纯前端渲染的站点会提示改用手动粘贴。'),
+      h('div', { style: S.grid(200) },
+        h(Field, { label: '列表页 URL' },
+          h('input', {
+            style: S.input, value: crawlUrl,
+            placeholder: 'https://jobs.example.com/campus',
+            onChange: (e) => setCrawlUrl(e.target.value),
+          })),
+        h(Field, { label: '公司名（可留空，页面有则用页面的）' },
+          h('input', { style: S.input, value: crawlCompany, onChange: (e) => setCrawlCompany(e.target.value) })),
+        h(Field, { label: '招聘类型' },
+          h('select', { style: S.input, value: crawlRecruit, onChange: (e) => setCrawlRecruit(e.target.value) },
+            h('option', { value: '' }, '自动判断'),
+            h('option', { value: 'autumn_campus' }, '秋招'),
+            h('option', { value: 'spring_campus' }, '春招'),
+            h('option', { value: 'summer' }, '暑期实习'),
+            h('option', { value: 'daily' }, '日常实习')))),
+      h('div', { style: { ...S.row, marginTop: 8 } },
+        h(Btn, {
+          kind: 'primary',
+          disabled: crawling || !crawlUrl.trim(),
+          onClick: () => {
+            setCrawling(true)
+            setError(null)
+            apiPost('/crawl', {
+              url: crawlUrl.trim(), company: crawlCompany.trim() || undefined,
+              recruitType: crawlRecruit || undefined, dryRun: true,
+            })
+              .then(setCrawlResult)
+              .catch((err) => setError(err.message))
+              .finally(() => setCrawling(false))
+          },
+        }, crawling ? '抓取中…' : '抓取预览'),
+        crawlResult
+          ? h(Btn, {
+            onClick: () => {
+              setCrawling(true)
+              apiPost('/crawl', {
+                url: crawlUrl.trim(), company: crawlCompany.trim() || undefined,
+                recruitType: crawlRecruit || undefined, dryRun: false,
+              })
+                .then((res) => { setCrawlResult(res); load(); onChanged?.() })
+                .catch((err) => setError(err.message))
+                .finally(() => setCrawling(false))
+            },
+          }, '确认入库')
+          : null),
+      crawlResult
+        ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+          h('div', { style: S.muted },
+            `共识别 ${crawlResult.results.reduce((n, r) => n + (r.count ?? 0), 0)} 条；`
+            + `新建 ${crawlResult.totals.created}，合并 ${crawlResult.totals.merged}`
+            + (crawlResult.dryRun ? '（预览，未写入）' : '')),
+          crawlResult.results.map((res) => h('div', { key: res.url, style: { marginTop: 8 } },
+            h('div', { style: { ...S.mono, wordBreak: 'break-all' } }, `${res.url} · ${res.ok ? res.strategy : '失败'}`),
+            res.ok === false ? h('div', { style: { ...S.muted, color: T.error } }, res.error) : null,
+            (res.warnings ?? []).map((w, i) => h('div', { key: i, style: { ...S.muted, color: T.warn } }, `! ${w}`)),
+            (res.postings ?? []).slice(0, 12).map((p, i) => h('div', {
+              key: `p${i}`,
+              style: { ...S.row, justifyContent: 'space-between', gap: 6, marginTop: 3 },
+            },
+              h('span', { style: { ...S.body, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+                `${p.company ? `${p.company} · ` : ''}${p.title}`),
+              h('span', { style: { ...S.row, gap: 6 } },
+                h(Chip, null, p.location || '地点未知'),
+                p.applyUrl
+                  ? h('a', {
+                    href: p.applyUrl, target: '_blank', rel: 'noreferrer',
+                    style: { ...S.muted, color: T.accent },
+                  }, '投递页')
+                  : null))))))
+        : null),
+
+    h('div', { style: S.card },
+      h('div', { style: S.h2 }, '新增岗位'),
+      h('div', { style: { ...S.muted, marginBottom: 8 } }, '粘贴 JD 原文即可自动解析地点/技能/截止日；同一岗位从不同来源重复保存会自动合并。'),
+      h('div', { style: S.grid(180) },
+        h(Field, { label: '公司 *' }, h('input', { style: S.input, value: form.company, onChange: (e) => setForm({ ...form, company: e.target.value }) })),
+        h(Field, { label: '岗位 *' }, h('input', { style: S.input, value: form.title, onChange: (e) => setForm({ ...form, title: e.target.value }) })),
+        h(Field, { label: '原始链接' }, h('input', { style: S.input, value: form.url, onChange: (e) => setForm({ ...form, url: e.target.value }) }))),
+      h('div', { style: { marginTop: 8 } },
+        h(Field, { label: 'JD 原文（可选，强烈建议）' },
+          h('textarea', { style: S.textarea, value: form.jdText, onChange: (e) => setForm({ ...form, jdText: e.target.value }), placeholder: '粘贴岗位描述与要求…' }))),
+      h('div', { style: { ...S.row, marginTop: 8, justifyContent: 'space-between' } },
+        h('label', { style: { ...S.row, ...S.muted, cursor: 'pointer' } },
+          h('input', { type: 'checkbox', checked: form.official, onChange: (e) => setForm({ ...form, official: e.target.checked }) }),
+          '此信息来自官方招聘页（可更新招聘状态）'),
+        h(Btn, { kind: 'primary', disabled: busy, onClick: saveJob }, busy ? '保存中…' : '保存岗位'))),
+
+    h('div', { style: S.card },
+      h('div', { style: { ...S.row, flexWrap: 'wrap', justifyContent: 'space-between' } },
+        h('div', { style: S.h2 }, '岗位库'),
+        h('div', { style: { ...S.row, flexWrap: 'wrap' } },
+          h('input', { style: { ...S.input, width: 190 }, value: query, onChange: (e) => setQuery(e.target.value), placeholder: '搜索公司/岗位/JD 关键词' }),
+          h('select', { style: { ...S.input, width: 130 }, value: status, onChange: (e) => setStatus(e.target.value) },
+            h('option', { value: '' }, '全部状态'),
+            ['OPEN', 'UPCOMING', 'UNVERIFIED', 'STALE', 'CLOSED', 'UNKNOWN'].map((s) => h('option', { key: s, value: s }, s))),
+          h('input', { style: { ...S.input, width: 100 }, value: minScore, onChange: (e) => setMinScore(e.target.value), placeholder: '最低分' }),
+          h(Btn, { kind: 'ghost', onClick: load }, '刷新'))),
+      h('div', { style: { ...S.muted, margin: '6px 0' } }, list?.scope ?? '仅检索本地库；未访问第三方招聘平台。'),
+      listBody),
+
+    detail
+      ? h('div', { style: S.card },
+        h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+          h('div', { style: S.h2 }, `${detail.company_name} · ${detail.title}`),
+          h('div', { style: S.row },
+            h(Chip, { tone: statusTone(detail.status) }, detail.statusLabel ?? detail.status),
+            h(Btn, { kind: 'primary', onClick: track }, '加入投递'))),
+        h('div', { style: { ...S.muted, marginTop: 4 } },
+          `状态核验：${detail.status_verified_at ? relTime(detail.status_verified_at) : '从未核验'} · 来源 ${detail.sources?.length ?? 0} 条 · 状态变更 ${detail.history?.length ?? 0} 次`),
+        detail.hardBlocks?.length || detail.match?.reasons
+          ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+            h('div', { style: S.h3 }, '匹配解释'),
+            h('div', { style: { ...S.muted } }, `匹配分 ${detail.match?.score ?? '未评分'}（与偏好的匹配度，不是录用概率）`),
+            (detail.match?.reasons?.matched ?? []).slice(0, 5).map((m, i) => h('div', { key: `m${i}`, style: { ...S.muted, color: T.success } }, `✓ ${m}`)),
+            (detail.match?.reasons?.missing ?? []).slice(0, 5).map((m, i) => h('div', { key: `x${i}`, style: { ...S.muted, color: T.warn } }, `! ${m}`)),
+            (detail.match?.reasons?.unknown ?? []).slice(0, 3).map((m, i) => h('div', { key: `u${i}`, style: S.muted }, `? ${m}`)))
+          : null,
+        detail.history?.length
+          ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+            h('div', { style: S.h3 }, '状态历史'),
+            detail.history.map((row) => h('div', { key: row.id, style: { ...S.muted, marginBottom: 3 } },
+              `${fmtDate(row.verified_at)} · ${row.previous_status ?? '—'} → ${row.status}${row.evidence ? ` · ${row.evidence}` : ''}`)))
+          : null,
+        h('div', { style: { ...S.cardTight, marginTop: 10 } },
+          h('div', { style: S.h3 }, '标记招聘状态'),
+          h('div', { style: { ...S.row, flexWrap: 'wrap' } },
+            [['OPEN', true], ['CLOSED', true], ['UPCOMING', true], ['UNVERIFIED', false], ['STALE', false]].map(([s, off]) =>
+              h(Btn, { key: s, kind: 'ghost', onClick: () => verify(s, off) }, `${s}${off ? '（官方）' : ''}`))),
+          h('div', { style: { ...S.muted, marginTop: 6 } }, '只有官方证据能把状态改成 OPEN/CLOSED；非官方来源最多把 UNKNOWN 升为 UNVERIFIED。')),
+        detail.sources?.length
+          ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+            h('div', { style: S.h3 }, '来源证据'),
+            detail.sources.map((s) => h('div', { key: s.id, style: { ...S.muted, marginBottom: 4, wordBreak: 'break-all' } },
+              h(Chip, { tone: s.confidence_level === 'A' ? 'success' : undefined }, s.confidence_level ?? 'C'),
+              ` ${s.source_type} · ${s.verification_status ?? 'unverified'} · ${fmtDate(s.retrieved_at)}`,
+              s.source_url ? h('a', { href: s.source_url, target: '_blank', rel: 'noreferrer', style: { color: T.accent, marginLeft: 6 } }, '打开') : null)))
+          : null,
+        detail.description ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+          h('div', { style: S.h3 }, '岗位描述'),
+          h('div', { style: { ...S.body, whiteSpace: 'pre-wrap', maxHeight: 260, overflow: 'auto' } }, detail.description)) : null)
+      : null)
+}
+
+// ─── Company / Industry ──────────────────────────────────────────────────────
+function IndustryTab() {
+  const [industries, setIndustries] = useState(null)
+  const [selected, setSelected] = useState(null)
+  const [detail, setDetail] = useState(null)
+  const [form, setForm] = useState({ name: '', summary: '' })
+  const [error, setError] = useState(null)
+
+  const load = useCallback(() => {
+    apiGet('/industries').then((res) => setIndustries(res.industries)).catch((err) => setError(err.message))
+  }, [])
+  useEffect(load, [load])
+
+  const open = (id) => {
+    setSelected(id)
+    apiGet(`/industry?id=${encodeURIComponent(id)}`).then((res) => setDetail(res.industry)).catch((err) => setError(err.message))
+  }
+
+  return h('div', { style: S.col },
+    error ? h('div', { style: { ...S.card, ...S.muted, color: T.error } }, error) : null,
+    h('div', { style: S.card },
+      h('div', { style: S.h2 }, '新增行业档案'),
+      h('div', { style: S.grid(200) },
+        h(Field, { label: '行业名' }, h('input', { style: S.input, value: form.name, onChange: (e) => setForm({ ...form, name: e.target.value }), placeholder: '人工智能 / 半导体' })),
+        h(Field, { label: '一句话摘要' }, h('input', { style: S.input, value: form.summary, onChange: (e) => setForm({ ...form, summary: e.target.value }) }))),
+      h('div', { style: { marginTop: 8 } },
+        h(Btn, { kind: 'primary', onClick: () => form.name.trim() && apiPost('/industry', form).then(() => { setForm({ name: '', summary: '' }); load() }).catch((err) => setError(err.message)) }, '创建'))),
+    h('div', { style: S.grid(300) },
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, `行业目录（${industries?.length ?? 0}）`),
+        industries === null ? h(Loading) : industries.length === 0
+          ? h(Empty, { title: '还没有行业档案', hint: '让 Agent 用 career_industry_upsert / career_research_save 生成研究简报后会出现在这里。' })
+          : h('div', { style: S.col }, industries.map((ind) => h('div', {
+            key: ind.id, onClick: () => open(ind.id), style: { ...S.cardTight, cursor: 'pointer', borderColor: selected === ind.id ? T.accent : T.border },
+          },
+            h('div', { style: { ...S.body, fontWeight: 600 } }, ind.name),
+            h('div', { style: S.muted }, `${ind.company_count ?? 0} 家公司${ind.summary ? ` · ${String(ind.summary).slice(0, 40)}` : ''}`))))),
+      h('div', { style: S.card },
+        detail
+          ? h('div', { style: S.col },
+            h('div', { style: S.h2 }, detail.name),
+            detail.summary ? h('div', { style: { ...S.body, whiteSpace: 'pre-wrap' } }, detail.summary) : h('div', { style: S.muted }, '暂无摘要'),
+            detail.companies?.length ? h('div', null, h('div', { style: S.h3 }, '相关公司'),
+              detail.companies.map((c) => h('div', { key: c.id, style: { ...S.muted } }, c.name))) : null,
+            detail.reports?.length ? h('div', null, h('div', { style: S.h3 }, '研究简报'),
+              detail.reports.map((r) => h('div', { key: r.id, style: { ...S.muted } }, `${r.title} · v${r.version} · ${fmtDate(r.updated_at)}`))) : null)
+          : h(Empty, { title: '选择左侧行业', hint: '行业档案包含产业链、格局、驱动因素与职业路径（由 Agent 研究后写入）。' })))
+  )
+}
+
+function CompanyTab() {
+  const [companies, setCompanies] = useState(null)
+  const [detail, setDetail] = useState(null)
+  const [form, setForm] = useState({ name: '', careersUrl: '', internUrl: '', cities: '', interest: 'watch' })
+  const [error, setError] = useState(null)
+
+  const load = useCallback(() => {
+    apiGet('/companies').then((res) => setCompanies(res.companies)).catch((err) => setError(err.message))
+  }, [])
+  useEffect(load, [load])
+
+  const open = (id) => apiGet(`/company?id=${encodeURIComponent(id)}`).then((res) => setDetail(res.company)).catch((err) => setError(err.message))
+
+  return h('div', { style: S.col },
+    error ? h('div', { style: { ...S.card, ...S.muted, color: T.error } }, error) : null,
+    h('div', { style: S.card },
+      h('div', { style: S.h2 }, '登记目标公司'),
+      h('div', { style: { ...S.muted, marginBottom: 8 } }, '填了官方招聘页地址，系统才能对其做变化监控（会先读 robots.txt）。'),
+      h('div', { style: S.grid(200) },
+        h(Field, { label: '公司名' }, h('input', { style: S.input, value: form.name, onChange: (e) => setForm({ ...form, name: e.target.value }) })),
+        h(Field, { label: '官方招聘页' }, h('input', { style: S.input, value: form.careersUrl, onChange: (e) => setForm({ ...form, careersUrl: e.target.value }), placeholder: 'https://jobs.example.com/campus' })),
+        h(Field, { label: '实习页' }, h('input', { style: S.input, value: form.internUrl, onChange: (e) => setForm({ ...form, internUrl: e.target.value }) })),
+        h(Field, { label: '办公城市' }, h('input', { style: S.input, value: form.cities, onChange: (e) => setForm({ ...form, cities: e.target.value }) }))),
+      h('div', { style: { marginTop: 8 } },
+        h(Btn, { kind: 'primary', onClick: () => form.name.trim() && apiPost('/company', { ...form, cities: form.cities }).then(() => { setForm({ name: '', careersUrl: '', internUrl: '', cities: '', interest: 'watch' }); load() }).catch((err) => setError(err.message)) }, '保存公司'))),
+    h('div', { style: S.grid(320) },
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, `公司列表（${companies?.length ?? 0}）`),
+        companies === null ? h(Loading) : companies.length === 0
+          ? h(Empty, { title: '还没有公司档案', hint: '先登记几家目标公司，再去做招聘页监控。' })
+          : h('div', { style: S.col }, companies.map((c) => h('div', {
+            key: c.id, onClick: () => open(c.id), style: { ...S.cardTight, cursor: 'pointer' },
+          },
+            h('div', { style: { ...S.body, fontWeight: 600 } }, c.name),
+            h('div', { style: S.muted }, [c.careers_url ? '有招聘页' : '无招聘页', (c.cities ?? []).join('/') || '城市未知'].join(' · ')))))),
+      h('div', { style: S.card },
+        detail
+          ? h('div', { style: S.col },
+            h('div', { style: S.h2 }, detail.name),
+            h('div', { style: S.muted }, [detail.website, detail.careers_url].filter(Boolean).join(' · ') || '未填写官网'),
+            detail.careers_url ? h('a', { href: detail.careers_url, target: '_blank', rel: 'noreferrer', style: { color: T.accent, ...S.body } }, '打开官方招聘页') : null,
+            h('div', { style: S.h3, marginTop: 8 }, `在库岗位（${detail.jobs.length}）`),
+            detail.jobs.length ? detail.jobs.slice(0, 8).map((j) => h('div', { key: j.id, style: S.muted }, `${j.title} · ${j.status}`)) : h('div', { style: S.muted }, '暂无'),
+            h('div', { style: { ...S.h3, marginTop: 8 } }, '论坛观点分布'),
+            detail.claimStats?.length
+              ? detail.claimStats.map((c, i) => h('div', { key: i, style: S.muted }, `${c.category} · ${c.evidence_level} 级 · ${c.n} 条`))
+              : h('div', { style: S.muted }, '暂无（需手动导入论坛内容）'))
+          : h(Empty, { title: '选择左侧公司', hint: '公司档案含招聘入口、在库岗位、研究简报与论坛观点统计。' })))
+  )
+}
+
+// ─── Social & Bar ────────────────────────────────────────────────────────────
+function SocialTab() {
+  const [posts, setPosts] = useState(null)
+  const [claims, setClaims] = useState(null)
+  const [bar, setBar] = useState(null)
+  const [queries, setQueries] = useState(null)
+  const [form, setForm] = useState({ platform: 'xiaohongshu', url: '', title: '', content: '', company: '', claim: '', category: 'interview', evidenceLevel: 'C' })
+  const [error, setError] = useState(null)
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(() => {
+    apiGet('/social').then((res) => { setPosts(res.posts); setClaims(res.claims) }).catch((err) => setError(err.message))
+  }, [])
+  useEffect(load, [load])
+
+  const submit = async () => {
+    if (!form.content.trim()) return setError('请粘贴正文或核心摘录')
+    setBusy(true)
+    setError(null)
+    try {
+      await apiPost('/social/import', {
+        platform: form.platform, url: form.url || undefined, title: form.title || undefined,
+        content: form.content, company: form.company || undefined, accessMode: 'manual_import',
+        claims: form.claim.trim() ? [{ category: form.category, claim: form.claim, evidenceLevel: form.evidenceLevel }] : undefined,
+      })
+      setForm({ ...form, url: '', title: '', content: '', claim: '' })
+      load()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const set = (key) => (ev) => setForm({ ...form, [key]: ev.target.value })
+
+  return h('div', { style: S.col },
+    error ? h('div', { style: { ...S.card, ...S.muted, color: T.error } }, error) : null,
+    h('div', { style: { ...S.card, borderColor: T.warn } },
+      h('div', { style: S.h2 }, '关于可采集范围'),
+      h('div', { style: S.muted }, '小红书 / 脉脉 / 牛客 / 知乎 等平台需登录且禁止自动化采集。系统不会抓取这些平台的正文；这里的内容全部来自你自己粘贴或合法导出的资料。单条自述按 C 级证据处理，只有独立来源互相印证才升为 B 级。')),
+    h('div', { style: S.card },
+      h('div', { style: S.h2 }, '导入一条经验/面经'),
+      h('div', { style: S.grid(170) },
+        h(Field, { label: '平台' }, h('select', { style: S.input, value: form.platform, onChange: set('platform') },
+          ['xiaohongshu', 'nowcoder', 'zhihu', 'maimai', 'v2ex', '1point3acres', 'github', 'other'].map((p) => h('option', { key: p, value: p }, p)))),
+        h(Field, { label: '关联公司' }, h('input', { style: S.input, value: form.company, onChange: set('company') })),
+        h(Field, { label: '标题' }, h('input', { style: S.input, value: form.title, onChange: set('title') })),
+        h(Field, { label: '原链接' }, h('input', { style: S.input, value: form.url, onChange: set('url') }))),
+      h('div', { style: { marginTop: 8 } },
+        h(Field, { label: '正文或核心摘录（必填）' }, h('textarea', { style: S.textarea, value: form.content, onChange: set('content'), placeholder: '粘贴你看到的内容…' }))),
+      h('div', { style: { ...S.grid(170), marginTop: 8 } },
+        h(Field, { label: '抽取一条观点（可选）' }, h('input', { style: S.input, value: form.claim, onChange: set('claim'), placeholder: '三轮面试先问项目' })),
+        h(Field, { label: '类别' }, h('select', { style: S.input, value: form.category, onChange: set('category') },
+          ['bar', 'interview', 'experience', 'salary', 'process'].map((c) => h('option', { key: c, value: c }, c)))),
+        h(Field, { label: '证据等级' }, h('select', { style: S.input, value: form.evidenceLevel, onChange: set('evidenceLevel') },
+          ['A', 'B', 'C', 'D', 'U'].map((l) => h('option', { key: l, value: l }, l))))),
+      h('div', { style: { marginTop: 8 } }, h(Btn, { kind: 'primary', disabled: busy, onClick: submit }, busy ? '导入中…' : '导入'))),
+
+    h('div', { style: S.grid(320) },
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, `已导入资料（${posts?.length ?? 0}）`),
+        posts === null ? h(Loading) : posts.length === 0
+          ? h(Empty, { title: '还没有导入资料', hint: '在牛客/小红书看到有用内容，复制正文粘贴到上面即可。' })
+          : h('div', { style: S.col }, posts.map((p) => h('div', { key: p.id, style: S.cardTight },
+            h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+              h('span', { style: { ...S.body, fontWeight: 600 } }, p.title || `${p.platform} 内容`),
+              h(Chip, null, p.platform)),
+            h('div', { style: S.muted }, `${p.access_mode} · ${fmtDate(p.retrieved_at)}`),
+            p.url ? h('a', { href: p.url, target: '_blank', rel: 'noreferrer', style: { ...S.muted, color: T.accent } }, '原帖') : null)))),
+
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, '观点汇总'),
+        claims === null ? h(Loading) : claims.total === 0
+          ? h('div', { style: S.muted }, '暂无结构化观点。导入资料时勾选「抽取观点」或在对话里让 Agent 抽取。')
+          : h('div', { style: S.col },
+            h('div', { style: { ...S.muted, fontStyle: 'italic' } }, claims.caveat),
+            claims.groups.map((g) => h('div', { key: g.category, style: S.cardTight },
+              h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+                h('span', { style: { ...S.body, fontWeight: 600 } }, g.category),
+                h('span', { style: S.muted }, `${g.sample} 条`)),
+              Object.entries(g.levels).map(([lv, n]) => h(Chip, { key: lv, tone: lv === 'A' ? 'success' : lv === 'D' ? 'error' : undefined }, `${lv} 级 ×${n}`)),
+              g.items.slice(0, 4).map((it) => h('div', { key: it.id, style: { ...S.muted, marginTop: 4 } }, `· ${it.claim}`))))),
+
+        h('div', { style: { marginTop: 12 } },
+          h('div', { style: S.h3 }, '招聘 Bar 速览'),
+          h('div', { style: S.row },
+            h(Btn, { kind: 'ghost', onClick: () => apiGet('/bar').then(setBar).catch((err) => setError(err.message)) }, '计算'),
+            h(Btn, { kind: 'ghost', onClick: () => apiPost('/bar/requirement', { kind: 'hard', text: '在此填写官方硬性要求', evidenceLevel: 'A' }).then(() => apiGet('/bar').then(setBar)).catch((err) => setError(err.message)) }, '用对话补充'))),
+          bar ? h('div', { style: { ...S.cardTight, marginTop: 8 } },
+            h('div', { style: { ...S.muted, fontSize: 11 } }, bar.disclaimer),
+            ['hard', 'preferred', 'observed', 'unverified'].map((k) => h('div', { key: k, style: { marginTop: 6 } },
+              h('div', { style: S.h3 }, `${k}（${bar[k].length}）`),
+              bar[k].slice(0, 5).map((r) => h('div', { key: r.id, style: S.muted }, `· ${r.text}`))))) : null),
+
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, '搜索入口生成'),
+        h('div', { style: { ...S.muted, marginBottom: 6 } }, '系统不抓取这些平台；这里只给你可直接打开的搜索链接。'),
+        h('div', { style: S.grid(150) },
+          h(Field, { label: '公司' }, h('input', { style: S.input, value: form.company, onChange: set('company') })),
+          h(Field, { label: '岗位' }, h('input', { style: S.input, value: form.title, onChange: set('title') }))),
+        h('div', { style: { marginTop: 8 } },
+          h(Btn, { onClick: () => apiPost('/search/web', { query: `${form.company} ${form.title} 实习 面经` }).then((res) => setQueries({ web: res.sources })).catch((err) => setError(err.message)) }, '用搜索引擎找线索')),
+        queries?.web?.length
+          ? h('div', { style: { ...S.col, marginTop: 8 } }, queries.web.map((s) => h('div', { key: s.url, style: S.cardTight },
+            h('a', { href: s.url, target: '_blank', rel: 'noreferrer', style: { ...S.body, color: T.accent } }, s.title || s.url),
+            s.snippet ? h('div', { style: { ...S.muted, marginTop: 3 } }, s.snippet) : null)))
+          : null))
+  )
+}
+
+// ─── Application tracker ─────────────────────────────────────────────────────
+function TrackerTab({ bootstrap, onChanged }) {
+  const [view, setView] = useState('list')
+  const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
+  const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+  const [typeFilter, setTypeFilter] = useState('')
+
+  const load = useCallback(() => {
+    const params = new URLSearchParams()
+    if (statusFilter) params.set('status', statusFilter)
+    if (query) params.set('q', query)
+    if (typeFilter) params.set('type', typeFilter)
+    if (view === 'list') params.set('sort', 'deadline')
+    const qs = params.toString()
+    apiGet(`/applications${qs ? `?${qs}` : ''}`).then(setData).catch((err) => setError(err.message))
+  }, [statusFilter, query, typeFilter, view])
+  useEffect(load, [load])
+
+  const exportCsv = () => {
+    const params = new URLSearchParams()
+    if (statusFilter) params.set('status', statusFilter)
+    if (query) params.set('q', query)
+    const qs = params.toString()
+    window.open(`${API}/applications/export${qs ? `?${qs}` : ''}`, '_blank')
+  }
+
+  const changeStatus = (id, status) => apiPost('/application/update', { id, status }).then(() => { load(); onChanged?.() }).catch((err) => setError(err.message))
+
+  const columns = data?.applications
+    ? ['saved', 'researching', 'resume_todo', 'ready', 'applied', 'assessment', 'written_test', 'interview_1', 'interview_2', 'final', 'hr', 'offer', 'rejected', 'closed', 'withdrawn']
+    : []
+
+  const cellStyle = { padding: '6px 8px', borderBottom: `1px solid ${T.border}`, color: T.text, verticalAlign: 'top' }
+  const cell = (content, extra) => h('td', { style: { ...cellStyle, ...(extra ?? {}) } }, content)
+  const listTable = data
+    ? h('div', { style: S.card },
+      h('div', { style: { ...S.muted, marginBottom: 8 } },
+        '按截止日期排序。投递地址是入库时抓到的申请页，点「打开」直接去投；「复制」方便粘贴到浏览器或表格。'),
+      h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 12.5 } },
+        h('thead', null, h('tr', null,
+          ['公司', '岗位', '类型', '工作地点', '投递地址', '状态', '投递日期', '截止', '下一步'].map((label) =>
+            h('th', { key: label, style: { textAlign: 'left', padding: '6px 8px', color: T.muted, borderBottom: `1px solid ${T.border}`, fontWeight: 600, whiteSpace: 'nowrap' } }, label)))),
+        h('tbody', null, data.applications.map((a) => h('tr', { key: a.id },
+          cell(a.company_name),
+          cell(a.job_title),
+          cell((data.recruitLabels ?? {})[a.recruit_type] ?? a.recruit_type ?? '—', { color: T.muted, whiteSpace: 'nowrap' }),
+          cell(a.location ?? '—', { color: T.muted, whiteSpace: 'nowrap' }),
+          cell(a.apply_url || a.url
+            ? h('span', { style: { ...S.row, gap: 6 } },
+              h('a', { href: a.apply_url || a.url, target: '_blank', rel: 'noreferrer', style: { color: T.accent } }, '打开'),
+              h('button', {
+                type: 'button',
+                title: a.apply_url || a.url,
+                onClick: () => {
+                  try { navigator.clipboard.writeText(a.apply_url || a.url) } catch { /* clipboard may be blocked */ }
+                },
+                style: { ...S.btn('ghost'), padding: '2px 6px', fontSize: 11 },
+              }, '复制'))
+            : h('span', { style: { color: T.muted } }, '—'), { maxWidth: 120 }),
+          cell(h(Chip, { tone: a.status === 'offer' ? 'success' : a.status === 'rejected' ? 'error' : a.status === 'applied' ? 'accent' : undefined },
+            (data.labels ?? {})[a.status] ?? a.status), { whiteSpace: 'nowrap' }),
+          cell(fmtDate(a.applied_at), { color: T.muted, whiteSpace: 'nowrap' }),
+          cell(fmtDate(a.deadline), { color: T.muted, whiteSpace: 'nowrap' }),
+          cell([a.next_action, fmtDate(a.next_action_at)].filter(Boolean).join(' @ ') || '—', { color: T.muted }))))))
+    : h(Loading)
+
+  return h('div', { style: S.col },
+    error ? h('div', { style: { ...S.card, ...S.muted, color: T.error } }, error) : null,
+    h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+      h('div', { style: S.h1 }, '投递管理'),
+      h('div', { style: S.row },
+        h(Btn, { kind: view === 'list' ? 'primary' : undefined, onClick: () => setView('list') }, '已投递清单'),
+        h(Btn, { kind: view === 'board' ? 'primary' : undefined, onClick: () => setView('board') }, '看板'),
+        h(Btn, { kind: view === 'table' ? 'primary' : undefined, onClick: () => setView('table') }, '表格'),
+        h(Btn, { kind: 'ghost', onClick: exportCsv }, '导出 CSV'),
+        h(Btn, { kind: 'ghost', onClick: load }, '刷新'))),
+
+    h('div', { style: { ...S.card, ...S.row, flexWrap: 'wrap', gap: 8 } },
+      h('input', {
+        style: { ...S.input, width: 200 }, value: query, placeholder: '搜索公司/岗位/备注',
+        onChange: (e) => setQuery(e.target.value),
+      }),
+      h('select', { style: { ...S.input, width: 140 }, value: statusFilter, onChange: (e) => setStatusFilter(e.target.value) },
+        h('option', { value: '' }, '全部状态'),
+        ['saved', 'researching', 'resume_todo', 'ready', 'applied', 'assessment', 'written_test', 'interview_1', 'interview_2', 'final', 'hr', 'offer', 'rejected', 'closed', 'withdrawn']
+          .map((s) => h('option', { key: s, value: s }, (data?.labels ?? {})[s] ?? s))),
+      h('select', { style: { ...S.input, width: 140 }, value: typeFilter, onChange: (e) => setTypeFilter(e.target.value) },
+        h('option', { value: '' }, '全部招聘类型'),
+        ['autumn_campus', 'spring_campus', 'summer', 'daily', 'other']
+          .map((t) => h('option', { key: t, value: t }, (data?.recruitLabels ?? {})[t] ?? t))),
+      h(Chip, null, `${data?.applications?.length ?? 0} 条`)),
+
+    data?.followUps && (data.followUps.overdue.length || data.followUps.stale.length)
+      ? h('div', { style: { ...S.card, borderColor: T.warn } },
+        h('div', { style: S.h3 }, '需要跟进'),
+        data.followUps.overdue.map((a) => h('div', { key: a.id, style: S.muted }, `逾期：${a.company_name} · ${a.job_title}（应做 ${a.next_action || '下一步'} @ ${fmtDate(a.next_action_at)}）`)),
+        data.followUps.stale.map((a) => h('div', { key: a.id, style: S.muted }, `长期无更新：${a.company_name} · ${a.job_title}（${a.age_days} 天）`)))
+      : null,
+
+    !data ? h(Loading) : data.applications.length === 0
+      ? h(Empty, {
+        title: query || statusFilter || typeFilter ? '没有符合条件的投递记录' : '还没有投递记录',
+        hint: '在「岗位雷达」里打开一个岗位点「加入投递」，或让 Agent 用 career_application_create 记录。',
+      })
+      : view === 'list'
+        ? listTable
+        : view === 'board'
+        ? h('div', { style: { display: 'flex', gap: 10, overflowX: 'auto', paddingBottom: 8 } },
+          columns.map((status) => {
+            const items = data.applications.filter((a) => a.status === status)
+            return h('div', { key: status, style: { minWidth: 190, flex: '0 0 auto' } },
+              h('div', { style: { ...S.row, justifyContent: 'space-between', marginBottom: 6 } },
+                h('span', { style: { ...S.body, fontWeight: 600 } }, data.labels[status] ?? status),
+                h(Chip, null, String(items.length))),
+              h('div', { style: S.col }, items.map((a) => h('div', { key: a.id, style: S.cardTight },
+                h('div', { style: { ...S.body, fontWeight: 600 } }, a.company_name),
+                h('div', { style: S.muted }, a.job_title),
+                h('select', {
+                  style: { ...S.input, marginTop: 6, fontSize: 11, padding: '3px 5px' },
+                  value: a.status,
+                  onChange: (e) => changeStatus(a.id, e.target.value),
+                }, columns.map((s) => h('option', { key: s, value: s }, data.labels[s] ?? s))),
+                a.next_action_at ? h('div', { style: { ...S.muted, fontSize: 11, marginTop: 4 } }, `下一步 ${fmtDate(a.next_action_at)}`) : null))))
+          }))
+        : h('div', { style: S.card },
+          h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 12.5 } },
+            h('thead', null, h('tr', null, ['公司', '岗位', '状态', '渠道', '投递日期', '下一步'].map((c) => h('th', { key: c, style: { textAlign: 'left', padding: '6px 8px', color: T.muted, borderBottom: `1px solid ${T.border}`, fontWeight: 600 } }, c)))),
+            h('tbody', null, data.applications.map((a) => h('tr', { key: a.id },
+              h('td', { style: { padding: '6px 8px', borderBottom: `1px solid ${T.border}`, color: T.text } }, a.company_name),
+              h('td', { style: { padding: '6px 8px', borderBottom: `1px solid ${T.border}`, color: T.text } }, a.job_title),
+              h('td', { style: { padding: '6px 8px', borderBottom: `1px solid ${T.border}` } }, h(Chip, { tone: a.status === 'offer' ? 'success' : a.status === 'rejected' ? 'error' : undefined }, data.labels[a.status] ?? a.status)),
+              h('td', { style: { padding: '6px 8px', borderBottom: `1px solid ${T.border}`, color: T.muted } }, a.channel ?? '—'),
+              h('td', { style: { padding: '6px 8px', borderBottom: `1px solid ${T.border}`, color: T.muted } }, fmtDate(a.applied_at)),
+              h('td', { style: { padding: '6px 8px', borderBottom: `1px solid ${T.border}`, color: T.muted } }, [a.next_action, fmtDate(a.next_action_at)].filter(Boolean).join(' @ ') || '—'))))))
+  )
+}
+
+// ─── Interview prep ──────────────────────────────────────────────────────────
+function InterviewTab() {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
+  useEffect(() => {
+    apiGet('/interview').then(setData).catch((err) => setError(err.message))
+  }, [])
+  return h('div', { style: S.col },
+    error ? h('div', { style: { ...S.card, ...S.muted, color: T.error } }, error) : null,
+    h('div', { style: { ...S.card, borderColor: T.accent } },
+      h('div', { style: S.h2 }, '面试准备'),
+      h('div', { style: S.muted }, '真实面经来自你导入的资料（C 级证据，样本有限）；AI 生成的练习题会单独标注。让 Agent 调用 career_interview_prep 可生成完整准备包。')),
+    !data ? h(Loading) : data.interviews.length === 0
+      ? h(Empty, { title: '还没有面经资料', hint: '在「论坛情报」导入面经，或让 Agent 用 career_forum_import 结构化整理。' })
+      : h('div', { style: S.col }, data.interviews.map((iv) => h('div', { key: iv.id, style: S.card },
+        h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+          h('div', { style: S.h3 }, `${iv.role_title ?? '岗位未标注'} · ${iv.stage ?? '阶段未知'} · ${iv.year ?? '年份未知'}`),
+          h(Chip, { tone: iv.evidence_level === 'A' ? 'success' : undefined }, `${iv.evidence_level} 级`)),
+        iv.topics.length ? h('div', { style: { ...S.row, flexWrap: 'wrap', marginTop: 6 } }, iv.topics.map((t) => h(Chip, { key: t }, t))) : null,
+        iv.questions.length ? h('div', { style: { marginTop: 6 } }, iv.questions.map((q, i) => h('div', { key: i, style: S.muted }, `Q: ${q}`))) : null)))
+  )
+}
+
+// ─── Settings ────────────────────────────────────────────────────────────────
+function SettingsTab({ bootstrap, onChanged }) {
+  const [error, setError] = useState(null)
+  const [notice, setNotice] = useState(null)
+  const [posture, setPosture] = useState(false)
+  const [deleteToken, setDeleteToken] = useState(null)
+  const [ruleForm, setRuleForm] = useState({ kind: 'job_deadline', name: '', url: '', company: '', withinDays: 7 })
+
+  const act = (fn, msg) => fn().then((res) => { setNotice(msg); onChanged?.(); return res }).catch((err) => setError(err.message))
+
+  return h('div', { style: S.col },
+    error ? h('div', { style: { ...S.card, ...S.muted, color: T.error } }, error) : null,
+    notice ? h('div', { style: { ...S.card, borderColor: T.success, ...S.muted, color: T.success } }, notice) : null,
+
+    h('div', { style: S.card },
+      h('div', { style: S.h2 }, '数据源健康'),
+      h('div', { style: { ...S.col, gap: 8 } },
+        (bootstrap?.sources ?? []).map((s) => h('div', { key: s.id, style: S.cardTight },
+          h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap' } },
+            h('div', null,
+              h('div', { style: { ...S.body, fontWeight: 600 } }, s.display_name ?? s.connector),
+              h('div', { style: S.mono }, `${s.connector} · ${s.access_mode}`)),
+            h('div', { style: { ...S.row, gap: 6 } },
+              h(Chip, { tone: s.enabled ? 'success' : 'error' }, s.enabled ? '启用' : '不可用'),
+              s.needsUser ? h(Chip, { tone: 'warn' }, '需手动') : null)),
+          h('div', { style: { ...S.muted, marginTop: 4 } }, s.rate_limit_note),
+          h('div', { style: { ...S.muted, fontSize: 11, marginTop: 3 } },
+            `最后成功 ${s.last_ok_at ? relTime(s.last_ok_at) : '—'} · 抓取 ${s.fetch_count} · 新增 ${s.insert_count} · 去重 ${s.dedupe_count}`),
+          s.last_error ? h('div', { style: { ...S.muted, color: T.error, marginTop: 3 } }, `最后错误：${s.last_error}`) : null)))),
+
+    h('div', { style: S.card },
+      h('div', { style: S.h2 }, '监控规则'),
+      h('div', { style: S.grid(170) },
+        h(Field, { label: '类型' }, h('select', { style: S.input, value: ruleForm.kind, onChange: (e) => setRuleForm({ ...ruleForm, kind: e.target.value }) },
+          [['job_deadline', '临近截止'], ['careers_page', '官方招聘页变化'], ['keyword_search', '关键词搜索'], ['social_watch', '论坛线索']].map(([v, l]) => h('option', { key: v, value: v }, l)))),
+        h(Field, { label: '名称' }, h('input', { style: S.input, value: ruleForm.name, onChange: (e) => setRuleForm({ ...ruleForm, name: e.target.value }) })),
+        ruleForm.kind === 'careers_page'
+          ? h(Field, { label: '招聘页 URL' }, h('input', { style: S.input, value: ruleForm.url, onChange: (e) => setRuleForm({ ...ruleForm, url: e.target.value }) }))
+          : null,
+        ruleForm.kind === 'job_deadline'
+          ? h(Field, { label: '提前天数' }, h('input', { style: S.input, value: ruleForm.withinDays, onChange: (e) => setRuleForm({ ...ruleForm, withinDays: e.target.value }) }))
+          : h(Field, { label: '公司' }, h('input', { style: S.input, value: ruleForm.company, onChange: (e) => setRuleForm({ ...ruleForm, company: e.target.value }) }))),
+      h('div', { style: { ...S.row, marginTop: 8 } },
+        h(Btn, { kind: 'primary', onClick: () => act(() => apiPost('/monitor/rule', {
+          kind: ruleForm.kind, name: ruleForm.name || ruleForm.kind,
+          spec: ruleForm.kind === 'careers_page' ? { url: ruleForm.url, company: ruleForm.company }
+            : ruleForm.kind === 'job_deadline' ? { withinDays: Number(ruleForm.withinDays) }
+              : ruleForm.kind === 'keyword_search' ? { queries: [`${ruleForm.company} 实习 招聘`] }
+                : { company: ruleForm.company },
+        }), '规则已创建') }, '创建规则'),
+        h(Btn, { onClick: () => act(() => apiPost('/monitor/run', {}).then((r) => setNotice(`已执行 ${r.ran ?? 0} 条规则（成功 ${r.ok ?? 0}，失败 ${r.error ?? 0}）`)), '监控完成') }, '立即执行全部')),
+
+      (bootstrap?.rules ?? []).length
+        ? h('div', { style: { ...S.col, marginTop: 10 } }, bootstrap.rules.map((r) => h('div', { key: r.id, style: { ...S.cardTight, ...S.row, justifyContent: 'space-between' } },
+          h('div', null,
+            h('div', { style: { ...S.body, fontWeight: 600 } }, r.name),
+            h('div', { style: S.mono }, `${r.kind} · ${r.cadence} · 上次 ${r.last_run_at ? relTime(r.last_run_at) : '从未'}`),
+            r.last_error ? h('div', { style: { ...S.muted, color: T.error } }, r.last_error) : null),
+          h('div', { style: S.row },
+            h(Chip, { tone: r.last_status === 'ok' ? 'success' : r.last_status === 'error' ? 'error' : undefined }, r.last_status ?? '未运行'),
+            h(Btn, { kind: 'ghost', onClick: () => act(() => apiPost('/monitor/run', { id: r.id }), '该规则已执行') }, '执行')))))
+        : h('div', { style: { ...S.muted, marginTop: 8 } }, '还没有规则。'),
+
+      (bootstrap?.runs ?? []).length
+        ? h('div', { style: { marginTop: 10 } },
+          h('div', { style: S.h3 }, '最近运行'),
+          bootstrap.runs.slice(0, 6).map((run) => h('div', { key: run.id, style: { ...S.mono } },
+            `${fmtDate(run.started_at)} ${run.kind} · ${run.status}${run.error ? ` · ${String(run.error).slice(0, 60)}` : ` · 抓取 ${run.fetched}`}`)))
+        : null),
+
+    h('div', { style: S.card },
+      h('div', { style: S.h2 }, '数据与隐私'),
+      h('div', { style: S.muted }, `所有数据保存在本机：${bootstrap?.status?.dataDir ?? ''}。简历原文与投递记录不会上传第三方；日志不记录简历全文。`),
+      h('div', { style: { ...S.row, flexWrap: 'wrap', marginTop: 8 } },
+        h(Btn, { onClick: () => act(() => apiPost('/export', {}), '已导出 JSON') }, '导出 JSON'),
+        h(Btn, { onClick: () => act(() => apiPost('/backup', {}), '已备份数据库') }, '备份数据库'),
+        h(Btn, { kind: 'ghost', onClick: () => apiPost('/data/delete/prepare', {}).then((res) => { setDeleteToken(res); setPosture(true) }).catch((err) => setError(err.message)) }, '删除全部数据')),
+      posture && deleteToken
+        ? h('div', { style: { ...S.cardTight, borderColor: T.error, marginTop: 8 } },
+          h('div', { style: { ...S.body, color: T.error, fontWeight: 600 } }, '确认删除？此操作不可撤销。'),
+          h('div', { style: S.muted }, JSON.stringify(deleteToken.counts)),
+          h('div', { style: { ...S.row, marginTop: 8 } },
+            h(Btn, {
+              onClick: () => apiPost('/data/delete/commit', { token: deleteToken.token })
+                .then(() => { setNotice('数据已删除'); setPosture(false); setDeleteToken(null); onChanged?.() })
+                .catch((err) => setError(err.message)),
+            }, '确认删除'),
+            h(Btn, { kind: 'ghost', onClick: () => { setPosture(false); setDeleteToken(null) } }, '取消')))
+        : null))
+}
+
+// ─── panel shell ─────────────────────────────────────────────────────────────
+const TABS = [
+  { key: 'overview', label: '总览', icon: '◱' },
+  { key: 'plan', label: '秋招计划', icon: '◷' },
+  { key: 'resume', label: '简历与画像', icon: '◧' },
+  { key: 'studio', label: '简历工作室', icon: '◨' },
+  { key: 'radar', label: '岗位雷达', icon: '◈' },
+  { key: 'tracker', label: '投递管理', icon: '☰' },
+  { key: 'company', label: '公司情报', icon: '◉' },
+  { key: 'industry', label: '行业研究', icon: '◎' },
+  { key: 'social', label: '论坛与 Bar', icon: '◔' },
+  { key: 'interview', label: '面试准备', icon: '◐' },
+  { key: 'settings', label: '设置', icon: '⚙' },
+]
+
+// ─── 秋招 / 春招作战计划 ─────────────────────────────────────────────────────
+function PlanTab({ onChanged }) {
+  const [plan, setPlan] = useState(null)
+  const [error, setError] = useState(null)
+  const [brief, setBrief] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [draft, setDraft] = useState({ title: '', startsAt: '', company: '', source: 'official' })
+
+  const load = useCallback(() => {
+    apiGet('/plan').then(setPlan).catch((err) => setError(err.message))
+  }, [])
+  useEffect(load, [load])
+
+  const makeBrief = () => {
+    setBusy(true)
+    setError(null)
+    apiPost('/plan/brief', {})
+      .then((res) => { setBrief(res); onChanged?.() })
+      .catch((err) => setError(err.message))
+      .finally(() => setBusy(false))
+  }
+
+  const addEvent = () => {
+    if (!draft.title.trim() || !draft.startsAt) {
+      setError('节点需要标题与日期')
+      return
+    }
+    apiPost('/event', {
+      title: draft.title.trim(),
+      startsAt: draft.startsAt,
+      company: draft.company.trim() || undefined,
+      source: draft.source,
+    })
+      .then(() => { setDraft({ title: '', startsAt: '', company: '', source: 'official' }); load() })
+      .catch((err) => setError(err.message))
+  }
+
+  if (!plan && !error) return h(Loading, { label: '正在推算你的时间线…' })
+
+  const timeline = plan?.timeline
+  const readiness = plan?.readiness ?? {}
+  const current = timeline?.current
+  const next = timeline?.next
+
+  return h('div', { style: S.col },
+    error ? h(ErrorBox, { error, onRetry: () => setError(null) }) : null,
+
+    h('div', { style: { ...S.card, borderColor: T.accent } },
+      h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+        h('div', { style: S.h2 }, '你现在处在哪个阶段'),
+        h(Btn, { kind: 'primary', disabled: busy, onClick: makeBrief }, busy ? '生成中…' : '生成综合简报')),
+      current
+        ? h('div', { style: S.col },
+          h('div', { style: { ...S.row, gap: 8 } },
+            h(Chip, { tone: 'accent' }, '进行中'),
+            h('span', { style: { ...S.h1 } }, current.label),
+            h(Chip, { tone: current.daysToEnd <= 14 ? 'warn' : undefined }, `还剩 ${current.daysToEnd} 天`)),
+          h(Bar, { value: (timeline.position?.progress ?? 0) * 100 }),
+          h('div', { style: S.muted }, current.hint))
+        : next
+          ? h('div', { style: S.col },
+            h('div', { style: { ...S.row, gap: 8 } },
+              h(Chip, null, '尚未开始'),
+              h('span', { style: { ...S.h1 } }, next.label),
+              h(Chip, { tone: 'accent' }, `还有 ${next.daysToStart} 天`)),
+            h('div', { style: S.muted }, next.hint))
+          : h('div', { style: S.muted }, '缺毕业年份，无法推算；先到「简历与画像」填毕业年份。'),
+      timeline ? h('div', { style: { ...S.muted, fontSize: 11, marginTop: 6 } }, timeline.caveat) : null),
+
+    h('div', { style: S.grid(300) },
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, '春招秋招时间线'),
+        timeline
+          ? h('div', { style: S.col }, timeline.phases.map((phase) => h('div', {
+            key: phase.key,
+            style: {
+              ...S.cardTight,
+              borderColor: phase.status === 'current' ? T.accent : T.border,
+              background: phase.status === 'current' ? 'rgba(37,99,235,0.06)' : T.surface,
+              opacity: phase.status === 'past' ? 0.55 : 1,
+            },
+          },
+            h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+              h('span', { style: { ...S.body, fontWeight: 600 } }, phase.label),
+              h(Chip, {
+                tone: phase.status === 'current' ? 'accent' : phase.status === 'past' ? undefined : 'success',
+              }, phase.status === 'current' ? '进行中' : phase.status === 'past' ? '已过' : `还有 ${phase.daysToStart} 天`)),
+            h('div', { style: S.mono }, `${phase.start} ~ ${phase.end}`))))
+          : h('div', { style: S.muted }, '缺毕业年份。')),
+
+      h('div', { style: S.col },
+        h('div', { style: S.card },
+          h('div', { style: S.h2 }, '按优先级该做的事'),
+          (plan?.actions ?? []).length
+            ? h('div', { style: S.col }, plan.actions.map((action, i) => h('div', {
+              key: i,
+              style: { ...S.cardTight, borderLeft: `3px solid ${action.priority === 1 ? T.error : action.priority === 2 ? T.warn : T.border2}` },
+            },
+              h('div', { style: { ...S.row, justifyContent: 'space-between', gap: 6 } },
+                h('span', { style: { ...S.body, fontWeight: 600 } }, action.title),
+                h(Chip, { tone: action.priority === 1 ? 'error' : action.priority === 2 ? 'warn' : undefined }, `P${action.priority}`)),
+              h('div', { style: { ...S.muted, marginTop: 3 } }, action.why),
+              action.how ? h('div', { style: { ...S.muted, fontSize: 11, opacity: 0.85 } }, `→ ${action.how}`) : null)))
+            : h('div', { style: S.muted }, '暂无待办。')),
+
+        h('div', { style: S.card },
+          h('div', { style: S.h2 }, '就绪度'),
+          h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 6 } },
+            h(Chip, { tone: readiness.profilePercent >= 70 ? 'success' : 'warn' }, `画像 ${readiness.profilePercent ?? 0}%`),
+            h(Chip, { tone: readiness.hasResume ? 'success' : 'error' }, readiness.hasResume ? '简历已导入' : '缺简历'),
+            h(Chip, null, `在招 ${readiness.openJobs ?? 0}`),
+            h(Chip, {
+              tone: (readiness.appliedCount ?? 0) >= (readiness.targetApplied ?? 0) ? 'success' : 'warn',
+            }, `在投 ${readiness.appliedCount ?? 0}/${readiness.targetApplied ?? 0}`),
+            h(Chip, { tone: readiness.closingSoon ? 'warn' : undefined }, `14 天内截止 ${readiness.closingSoon ?? 0}`)),
+
+          h('div', { style: { ...S.h3, marginTop: 12 } }, '登记一个节点'),
+          h('div', { style: S.grid(140) },
+            h(Field, { label: '标题' }, h('input', { style: S.input, value: draft.title, onChange: (e) => setDraft({ ...draft, title: e.target.value }), placeholder: '字节跳动 秋招网申截止' })),
+            h(Field, { label: '日期' }, h('input', { style: { ...S.input, type: 'date' }, value: draft.startsAt, onChange: (e) => setDraft({ ...draft, startsAt: e.target.value }) })),
+            h(Field, { label: '公司' }, h('input', { style: S.input, value: draft.company, onChange: (e) => setDraft({ ...draft, company: e.target.value }) })),
+            h(Field, { label: '来源' }, h('select', { style: S.input, value: draft.source, onChange: (e) => setDraft({ ...draft, source: e.target.value }) },
+              h('option', { value: 'official' }, '官方公告'),
+              h('option', { value: 'user' }, '我自己填'),
+              h('option', { value: 'estimate' }, '经验估计')))),
+          h('div', { style: { marginTop: 8 } }, h(Btn, { onClick: addEvent }, '添加节点')),
+
+          (plan?.events ?? []).length
+            ? h('div', { style: { marginTop: 10 } }, plan.events.slice(0, 8).map((ev) => h('div', { key: ev.id, style: S.muted },
+              `${ev.starts_at} · ${ev.company_name ? `${ev.company_name} · ` : ''}${ev.title}`,
+              h(Chip, { tone: ev.source === 'official' ? 'success' : undefined }, ev.source === 'official' ? '官方' : ev.source === 'user' ? '自填' : '估计'))))
+            : h('div', { style: { ...S.muted, marginTop: 8 } }, '还没有登记公司级节点。'))) ),
+
+    brief
+      ? h('div', { style: S.card },
+        h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+          h('div', { style: S.h2 }, '综合分析简报'),
+          h(Btn, { kind: 'ghost', onClick: () => setBrief(null) }, '收起')),
+        brief.reportId ? h('div', { style: S.muted }, `已存入研究简报库（id ${brief.reportId}）`) : null,
+        brief.missing?.length
+          ? h('div', { style: { ...S.cardTight, borderColor: T.warn, marginTop: 8 } },
+            h('div', { style: S.h3 }, '缺什么（这些没有数据，简报里不会编）'),
+            brief.missing.map((m, i) => h('div', { key: i, style: S.muted }, `· ${m}`)))
+          : null,
+        h('pre', {
+          style: {
+            marginTop: 10, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12, lineHeight: 1.65,
+            color: T.text, background: T.surface2, borderRadius: 10, padding: 12, maxHeight: 460, overflow: 'auto',
+            fontFamily: 'inherit',
+          },
+        }, brief.markdown))
+      : null)
+}
+
+// ─── 简历工作室：上传 / 素材库 / 微调 / LaTeX ────────────────────────────────
+function readAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = String(reader.result ?? '')
+      resolve(result.includes(',') ? result.slice(result.indexOf(',') + 1) : result)
+    }
+    reader.onerror = () => reject(new Error('读取文件失败'))
+    reader.readAsDataURL(file)
+  })
+}
+
+const KIND_OPTIONS = [
+  ['education', '教育背景'], ['internship', '实习经历'], ['project', '项目经历'],
+  ['research', '科研经历'], ['activity', '校园经历'], ['award', '奖项荣誉'],
+  ['certificate', '证书'], ['skill', '技能'],
+]
+
+function StudioTab({ onChanged }) {
+  const [view, setView] = useState('upload')
+  const [error, setError] = useState(null)
+  const [notice, setNotice] = useState(null)
+
+  // upload
+  const [uploading, setUploading] = useState(false)
+
+  // vault
+  const [vault, setVault] = useState(null)
+  const [draft, setDraft] = useState({ kind: 'internship', organization: '', role: '', startAt: '', endAt: '', bullets: '' })
+
+  // tailor
+  const [jobs, setJobs] = useState([])
+  const [tailorJobId, setTailorJobId] = useState('')
+  const [tailorPlan, setTailorPlan] = useState(null)
+  const [tailoring, setTailoring] = useState(false)
+
+  // latex
+  const [versions, setVersions] = useState([])
+  const [texVersionId, setTexVersionId] = useState('')
+  const [tex, setTex] = useState('')
+  const [compiling, setCompiling] = useState(false)
+  const [pdfRev, setPdfRev] = useState(0)
+  const [compileInfo, setCompileInfo] = useState(null)
+
+  // documents（个人资料库）
+  const [docs, setDocs] = useState(null)
+  const [docUploading, setDocUploading] = useState(false)
+
+  const loadVault = useCallback(() => {
+    apiGet('/experience').then((res) => setVault(res)).catch((err) => setError(err.message))
+  }, [])
+  const loadVersions = useCallback(() => {
+    apiGet('/resumes').then((res) => {
+      setVersions(res.resumes ?? [])
+      setTexVersionId((prev) => prev || res.active || res.resumes?.[0]?.id || '')
+    }).catch((err) => setError(err.message))
+  }, [])
+  const loadJobs = useCallback(() => {
+    apiGet('/jobs?limit=100').then((res) => setJobs(res.jobs ?? [])).catch((err) => setError(err.message))
+  }, [])
+  const loadDocs = useCallback(() => {
+    apiGet('/documents').then(setDocs).catch((err) => setError(err.message))
+  }, [])
+
+  useEffect(() => {
+    if (view === 'vault') loadVault()
+    if (view === 'tailor') loadJobs()
+    if (view === 'latex') loadVersions()
+    if (view === 'docs') loadDocs()
+  }, [view, loadVault, loadJobs, loadVersions, loadDocs])
+
+  useEffect(() => {
+    if (view !== 'latex' || !texVersionId) return
+    apiGet(`/resume/tex?versionId=${encodeURIComponent(texVersionId)}`)
+      .then((res) => { setTex(res.tex ?? ''); setCompileInfo(null) })
+      .catch((err) => setError(err.message))
+  }, [view, texVersionId])
+
+  // ── upload ──
+  const onFile = async (event) => {
+    const files = Array.from(event?.target?.files ?? []).slice(0, 40)
+    if (!files.length) return
+    setUploading(true)
+    setError(null)
+    setNotice(null)
+    const done = []
+    const failed = []
+    const dup = []
+    try {
+      for (const file of files) {
+        try {
+          const dataBase64 = await readAsBase64(file)
+          const res = await apiPost('/resume/upload', { fileName: file.name, dataBase64, seedVault: false, setActive: false })
+          done.push({ name: file.name, chars: res.chars, confidence: res.proposal?.confidence ?? 0, resumeId: res.resumeId })
+        } catch (err) {
+          const msg = String(err?.message ?? err)
+          if (/重复|相同|duplicate/i.test(msg)) dup.push(file.name)
+          else failed.push({ name: file.name, error: msg.slice(0, 160) })
+        }
+      }
+      const okText = `已导入 ${done.length} 份` + (done.length ? `（${done.map((d) => `${d.name} ${d.chars}字`).join('、')}）` : '')
+      const failText = failed.length ? `；失败 ${failed.length} 份：${failed.map((f) => `${f.name}（${f.error}）`).join('、')}` : ''
+      setNotice(okText + failText + '。原始文件都保留，接下来去「素材库」合并去重。')
+      onChanged?.()
+    } finally {
+      setUploading(false)
+      if (event?.target) event.target.value = ''
+    }
+  }
+
+  // ── vault ──
+  const saveDraft = () => {
+    const bullets = draft.bullets.split('\n').map((l) => l.trim()).filter(Boolean)
+    if (!draft.organization.trim() && !draft.role.trim() && !bullets.length) {
+      setError('至少填公司/项目名或一条要点')
+      return
+    }
+    apiPost('/experience', {
+      kind: draft.kind,
+      organization: draft.organization.trim() || undefined,
+      role: draft.role.trim() || undefined,
+      startAt: draft.startAt || undefined,
+      endAt: draft.endAt || undefined,
+      bullets,
+    }).then(() => {
+      setDraft({ kind: draft.kind, organization: '', role: '', startAt: '', endAt: '', bullets: '' })
+      setNotice('已加入素材库')
+      loadVault()
+    }).catch((err) => setError(err.message))
+  }
+
+  const patchExperience = (id, patch) => apiPost('/experience/update', { id, ...patch })
+    .then(() => { loadVault(); setNotice('已保存') })
+    .catch((err) => setError(err.message))
+
+  const removeExperience = (id) => apiPost('/experience/delete', { id })
+    .then(() => { loadVault(); setNotice('已删除') })
+    .catch((err) => setError(err.message))
+
+  const toggleVerified = (exp) => patchExperience(exp.id, { verified: !exp.verified })
+
+  // ── tailor ──
+  const runTailor = (dryRun) => {
+    if (!tailorJobId) {
+      setError('先选一个目标岗位')
+      return
+    }
+    setTailoring(true)
+    setError(null)
+    apiPost('/resume/tailor', { jobId: tailorJobId, dryRun })
+      .then((res) => {
+        setTailorPlan(res)
+        if (!dryRun) {
+          setNotice(`已生成定制版本「${res.label}」（未自动设为当前版本）`)
+          onChanged?.()
+        }
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setTailoring(false))
+  }
+
+  // ── latex ──
+  const saveTex = () => apiPost('/resume/tex', { versionId: texVersionId, tex })
+    .then(() => setNotice('LaTeX 源码已保存'))
+    .catch((err) => setError(err.message))
+
+  const regenerateTex = () => apiPost('/resume/tex', { versionId: texVersionId, regenerate: true })
+    .then((res) => { setTex(res.tex ?? ''); setNotice('已根据解析结果重新生成骨架') })
+    .catch((err) => setError(err.message))
+
+  const compile = () => {
+    setCompiling(true)
+    setError(null)
+    apiPost('/resume/compile', { versionId: texVersionId, tex })
+      .then((res) => {
+        setCompileInfo(res)
+        if (res.ok) {
+          setPdfRev((n) => n + 1)
+          setNotice(`编译成功（${res.engine}${res.cached ? ' · 缓存' : ` · ${res.ms}ms`}）`)
+        } else {
+          setError(`编译失败：${res.error ?? '未知错误'}`)
+        }
+      })
+      .catch((err) => setError(err.message))
+      .finally(() => setCompiling(false))
+  }
+
+  const downloadTex = () => {
+    try {
+      const blob = new Blob([tex], { type: 'application/x-tex' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `resume-${texVersionId.slice(0, 8)}.tex`
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      setError('下载失败，可直接复制文本框内容')
+    }
+  }
+
+  const pdfUrl = texVersionId ? `${API}/resume/pdf?id=${encodeURIComponent(texVersionId)}&v=${pdfRev}` : ''
+
+  // ── render helpers ──
+  const subnav = h('div', { style: { ...S.row, flexWrap: 'wrap' } },
+    [['upload', '上传'], ['vault', '素材库'], ['docs', '资料库'], ['tailor', '针对岗位微调'], ['latex', 'LaTeX 工作室']].map(([key, label]) =>
+      h(Btn, { key, kind: view === key ? 'primary' : undefined, onClick: () => { setView(key); setError(null); setNotice(null); setTailorPlan(null) } }, label)))
+
+  const vaultList = !vault
+    ? h(Loading)
+    : vault.experiences.length === 0
+      ? h(Empty, { title: '素材库还是空的', hint: '先「上传」一份简历自动沉淀，或在这里手动加一条实习/项目。' })
+      : h('div', { style: S.col }, vault.experiences.map((exp) => h('div', { key: exp.id, style: S.cardTight },
+        h('div', { style: { ...S.row, justifyContent: 'space-between', gap: 8 } },
+          h('div', { style: { ...S.col, gap: 2, minWidth: 0 } },
+            h('div', { style: { ...S.body, fontWeight: 600 } },
+              `${exp.organization ?? '（未填机构）'}${exp.role ? ` · ${exp.role}` : ''}`),
+            h('div', { style: S.mono }, `${(vault.kindLabels ?? {})[exp.kind] ?? exp.kind}${exp.period ? ` · ${exp.period}` : ''}`)),
+          h('div', { style: { ...S.row, gap: 6 } },
+            h(Chip, { tone: exp.verified ? 'success' : 'warn' }, exp.verified ? '已确认' : '待确认'),
+            h(Btn, { kind: 'ghost', onClick: () => toggleVerified(exp) }, exp.verified ? '取消确认' : '确认属实'),
+            h(Btn, { kind: 'ghost', onClick: () => removeExperience(exp.id) }, '删除'))),
+        exp.bullets.length
+          ? h('div', { style: { marginTop: 6 } }, exp.bullets.map((bullet, i) => h('div', { key: i, style: { ...S.muted } }, `· ${bullet}`)))
+          : h('div', { style: { ...S.muted, marginTop: 6 } }, '（这条没有要点）'),
+        exp.skills.length
+          ? h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 4, marginTop: 6 } }, exp.skills.map((s) => h(Chip, { key: s }, s)))
+          : null)))
+
+  const tailorPreview = tailorPlan
+    ? h('div', { style: S.col },
+      h('div', { style: { ...S.cardTight, borderColor: T.accent } },
+        h('div', { style: S.h3 }, tailorPlan.dryRun === false ? '已生成的定制版本' : '微调方案（预览）'),
+        (tailorPlan.plan?.rationale ?? []).map((line, i) => h('div', { key: i, style: { ...S.muted, marginTop: 3 } }, `· ${line}`)),
+        (tailorPlan.plan?.warnings ?? []).map((line, i) => h('div', { key: `w${i}`, style: { ...S.muted, color: T.warn } }, `! ${line}`))),
+      h('div', { style: S.grid(320) },
+        h('div', { style: S.card },
+          h('div', { style: S.h2 }, `保留的经历（${tailorPlan.plan?.selected?.length ?? 0}）`),
+          (tailorPlan.plan?.selected ?? []).map((item) => h('div', { key: item.experienceId, style: S.cardTight },
+            h('div', { style: { ...S.body, fontWeight: 600 } }, `${item.organization ?? ''}${item.role ? ` · ${item.role}` : ''}`),
+            h('div', { style: S.mono }, `${item.kindLabel}${item.period ? ` · ${item.period}` : ''}`),
+            item.bullets.map((b, i) => h('div', { key: i, style: { ...S.muted, marginTop: 2 } }, `· ${b}`)),
+            item.matchedSkills?.length
+              ? h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 4, marginTop: 4 } }, item.matchedSkills.map((s) => h(Chip, { key: s, tone: 'success' }, s)))
+              : null))),
+        h('div', { style: S.col },
+          h('div', { style: S.card },
+            h('div', { style: S.h2 }, `移出的经历（${tailorPlan.plan?.omitted?.length ?? 0}）`),
+            (tailorPlan.plan?.omitted ?? []).length
+              ? tailorPlan.plan.omitted.map((item) => h('div', { key: item.experienceId, style: { ...S.muted, marginTop: 3 } },
+                `${item.organization ?? ''} · ${item.role ?? ''} — ${item.reason}`))
+              : h('div', { style: S.muted }, '没有移出任何经历。')),
+          h('div', { style: S.card },
+            h('div', { style: S.h2 }, `岗位要求里你缺的（${tailorPlan.plan?.gaps?.length ?? 0}）`),
+            (tailorPlan.plan?.gaps ?? []).length
+              ? h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 4 } }, tailorPlan.plan.gaps.map((g) => h(Chip, { key: g, tone: 'error' }, g)))
+              : h('div', { style: S.muted }, '没有识别出缺口。'),
+            h('div', { style: { ...S.muted, marginTop: 6, fontSize: 11 } }, '这些是素材库里确实没有的东西——系统不会替你编。要么补经历，要么承认不匹配。')))),
+      tailorPlan.preview
+        ? h('div', { style: S.card },
+          h('div', { style: S.h2 }, '生成的简历（纯文本预览）'),
+          h('pre', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 12, lineHeight: 1.6, fontFamily: 'inherit', margin: 0 } }, tailorPlan.preview))
+        : null,
+      h('div', { style: S.row },
+        h(Btn, { kind: 'primary', disabled: tailoring, onClick: () => runTailor(false) }, '生成这个岗位的版本')))
+    : null
+
+  const latexView = h('div', { style: S.col },
+    h('div', { style: S.card },
+      h('div', { style: S.h2 }, '选择版本'),
+      h('div', { style: { ...S.row, flexWrap: 'wrap' } },
+        h('select', { style: { ...S.input, maxWidth: 360 }, value: texVersionId, onChange: (e) => setTexVersionId(e.target.value) },
+          versions.length
+            ? versions.map((v) => h('option', { key: v.id, value: v.id }, `${v.label}${v.is_active ? '（当前）' : ''}`))
+            : h('option', { value: '' }, '还没有简历版本')),
+        h(Btn, { onClick: regenerateTex, disabled: !texVersionId }, '从解析结果重生成'),
+        h(Btn, { onClick: saveTex, disabled: !texVersionId }, '保存源码'),
+        h(Btn, { kind: 'primary', onClick: compile, disabled: !texVersionId || compiling }, compiling ? '编译中…' : '编译 PDF'),
+        h(Btn, { kind: 'ghost', onClick: downloadTex, disabled: !tex }, '下载 .tex'),
+        h(Btn, { kind: 'ghost', onClick: () => window.open('https://www.overleaf.com/project', '_blank') }, '打开 Overleaf')),
+      compileInfo && !compileInfo.ok && compileInfo.logTail
+        ? h('pre', { style: { ...S.mono, marginTop: 8, maxHeight: 140, overflow: 'auto', whiteSpace: 'pre-wrap', color: T.error } }, compileInfo.logTail)
+        : null),
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: 10, minHeight: 420 } },
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, 'LaTeX 源码'),
+        h('textarea', {
+          style: { ...S.textarea, minHeight: 380, fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 11.5, lineHeight: 1.5 },
+          value: tex,
+          spellCheck: false,
+          onChange: (e) => setTex(e.target.value),
+        })),
+      h('div', { style: S.card },
+        h('div', { style: { ...S.row, justifyContent: 'space-between' } },
+          h('div', { style: S.h2 }, 'PDF 预览'),
+          compileInfo?.pdfPath ? h(Chip, { tone: 'success' }, compileInfo.engine ?? 'compiled') : null),
+        texVersionId && compileInfo?.ok
+          ? h('iframe', {
+            title: 'resume-pdf',
+            src: pdfUrl,
+            style: { width: '100%', height: 400, border: `1px solid ${T.border}`, borderRadius: 8, background: '#fff' },
+          })
+          : h('div', { style: { ...S.muted, marginTop: 20, textAlign: 'center' } },
+            '点「编译 PDF」后在这里预览。编译使用本机 XeLaTeX（-no-shell-escape + 超时保护），相同源码复用缓存。'))))
+
+  const body = view === 'upload'
+    ? h('div', { style: S.col },
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, '上传简历'),
+        h('div', { style: { ...S.muted, marginBottom: 10 } },
+          '支持 .pdf / .docx / .md / .txt。上传后会：① 提取文本 ② 生成解析候选 ③ 把识别到的经历沉淀进素材库（标为未确认）。原文件保存在本机 data/resumes/。'),
+        h('input', {
+          type: 'file',
+          multiple: true,
+          accept: '.pdf,.docx,.md,.txt,.json',
+          onChange: onFile,
+          style: { ...S.input, padding: 8, cursor: 'pointer' },
+        }),
+        h('div', { style: { ...S.muted, marginTop: 6, fontSize: 11 } }, '可以一次选多份（旧版本、不同方向、零散笔记都行，最多 40 份）。每份都会保存原文，互不覆盖。'),
+        uploading ? h('div', { style: { ...S.muted, marginTop: 8 } }, '正在批量上传并解析…') : null),
+      h('div', { style: S.card },
+        h('div', { style: S.h2 }, '这套东西怎么配合用'),
+        h('div', { style: { ...S.body } },
+          h('div', null, '1. **素材库**装你所有详细经历（唯一事实来源，写全写细）。'),
+          h('div', null, '2. **针对岗位微调**只从素材库挑选+排序，不改写事实，并列出你缺什么。'),
+          h('div', null, '3. **LaTeX 工作室**像 Overleaf 一样改源码看 PDF，导出去 Overleaf 也能编译。'))))
+    : view === 'vault'
+      ? h('div', { style: S.col },
+        h('div', { style: S.card },
+          h('div', { style: S.h2 }, '加一条经历'),
+          h('div', { style: S.grid(160) },
+            h(Field, { label: '类型' }, h('select', { style: S.input, value: draft.kind, onChange: (e) => setDraft({ ...draft, kind: e.target.value }) },
+              KIND_OPTIONS.map(([value, label]) => h('option', { key: value, value }, label)))),
+            h(Field, { label: '公司/项目/学校' }, h('input', { style: S.input, value: draft.organization, onChange: (e) => setDraft({ ...draft, organization: e.target.value }) })),
+            h(Field, { label: '岗位/角色' }, h('input', { style: S.input, value: draft.role, onChange: (e) => setDraft({ ...draft, role: e.target.value }) })),
+            h(Field, { label: '开始' }, h('input', { style: S.input, value: draft.startAt, placeholder: '2025-07', onChange: (e) => setDraft({ ...draft, startAt: e.target.value }) })),
+            h(Field, { label: '结束' }, h('input', { style: S.input, value: draft.endAt, placeholder: '2025-09', onChange: (e) => setDraft({ ...draft, endAt: e.target.value }) }))),
+          h('div', { style: { marginTop: 8 } },
+            h(Field, { label: '要点（每行一条，尽量带真实数字）' },
+              h('textarea', { style: S.textarea, value: draft.bullets, onChange: (e) => setDraft({ ...draft, bullets: e.target.value }), placeholder: '负责用户调研，产出 2 份需求文档\n用 SQL 完成留存分析，定位 3 个流失点' }))),
+          h('div', { style: { marginTop: 8 } }, h(Btn, { kind: 'primary', onClick: saveDraft }, '加入素材库'))),
+        vaultList)
+      : view === 'tailor'
+        ? h('div', { style: S.col },
+          h('div', { style: S.card },
+            h('div', { style: S.h2 }, '选目标岗位，生成针对性版本'),
+            h('div', { style: { ...S.muted, marginBottom: 8 } }, '先在「岗位雷达」里把岗位存进来。微调只做挑选与排序，不会改写或编造内容。'),
+            h('div', { style: { ...S.row, flexWrap: 'wrap' } },
+              h('select', {
+                style: { ...S.input, maxWidth: 420 },
+                value: tailorJobId,
+                onChange: (e) => setTailorJobId(e.target.value),
+              },
+                h('option', { value: '' }, jobs.length ? '选择岗位…' : '库里还没有岗位'),
+                jobs.map((j) => h('option', { key: j.id, value: j.id }, `${j.company} · ${j.title}`)),
+              ),
+              h(Btn, { kind: 'primary', disabled: tailoring || !tailorJobId, onClick: () => runTailor(true) }, tailoring ? '分析中…' : '预览方案'),
+            ),
+          ),
+          tailorPreview,
+        )
+        : view === 'latex'
+          ? latexView
+          : docsView
+
+  const onDocFiles = async (event) => {
+    const files = Array.from(event?.target?.files ?? []).slice(0, 40)
+    if (!files.length) return
+    setDocUploading(true)
+    setError(null)
+    setNotice(null)
+    const ok = []
+    const failed = []
+    try {
+      for (const file of files) {
+        try {
+          const dataBase64 = await readAsBase64(file)
+          const res = await apiPost('/document/upload', { fileName: file.name, dataBase64 })
+          ok.push(`${file.name}→${(docs?.categories ?? {})[res.proposal?.category] ?? res.proposal?.category ?? '已存入'}`)
+        } catch (err) {
+          failed.push(`${file.name}（${String(err?.message ?? err).slice(0, 80)}）`)
+        }
+      }
+      setNotice(`已存入 ${ok.length} 份资料${ok.length ? `：${ok.join('、')}` : ''}` + (failed.length ? `；失败：${failed.join('、')}` : '') + '。类别与分数是自动判断的，请核对后点「确认」。')
+      loadDocs()
+    } finally {
+      setDocUploading(false)
+      if (event?.target) event.target.value = ''
+    }
+  }
+
+  const docList = !docs
+    ? h(Loading)
+    : docs.documents.length === 0
+      ? h(Empty, { title: '资料库还是空的', hint: '把学位证、成绩单、四六级/托福成绩、专利证书、获奖证明一起传进来，系统会分类并存档。' })
+      : h('div', { style: S.col }, docs.documents.map((doc) => h('div', { key: doc.id, style: S.cardTight },
+        h('div', { style: { ...S.row, justifyContent: 'space-between', gap: 8 } },
+          h('div', { style: { ...S.col, gap: 2, minWidth: 0 } },
+            h('div', { style: { ...S.body, fontWeight: 600 } }, doc.title),
+            h('div', { style: S.mono }, [
+              (docs.categories ?? {})[doc.category] ?? doc.category,
+              doc.score,
+              doc.issuer,
+              doc.issued_at,
+              doc.credential_id,
+            ].filter(Boolean).join(' · '))),
+          h('div', { style: { ...S.row, gap: 6 } },
+            h(Chip, { tone: doc.verified ? 'success' : 'warn' }, doc.verified ? '已确认' : '待确认'),
+            h(Btn, {
+              kind: 'ghost',
+              onClick: () => apiPost('/document/update', { id: doc.id, verified: !doc.verified })
+                .then(() => { loadDocs(); setNotice('已更新') })
+                .catch((err) => setError(err.message)),
+            }, doc.verified ? '取消确认' : '确认属实'),
+            h(Btn, {
+              kind: 'ghost',
+              onClick: () => apiPost('/document/delete', { id: doc.id })
+                .then(() => { loadDocs(); setNotice('已删除') })
+                .catch((err) => setError(err.message)),
+            }, '删除'))))))
+
+  const docsView = h('div', { style: S.col },
+    h('div', { style: S.card },
+      h('div', { style: S.h2 }, '个人资料库'),
+      h('div', { style: { ...S.muted, marginBottom: 10 } },
+        '这里放「凭据」：学历学位、成绩单、四六级/托福、专利、获奖、实习证明。经历放「素材库」，凭据放这里——出简历时按岗位各取所需。'),
+      h('input', {
+        type: 'file',
+        multiple: true,
+        accept: '.pdf,.docx,.md,.txt,.json,.png,.jpg,.jpeg,.webp',
+        onChange: onDocFiles,
+        style: { ...S.input, padding: 8, cursor: 'pointer' },
+      }),
+      h('div', { style: { ...S.muted, marginTop: 6, fontSize: 11 } },
+        '可一次传多份（最多 40）。PDF/DOCX 会提取文本并自动判断类别、抽取托福/雅思/四六级/GPA 分数；图片型扫描件只登记文件、不做 OCR，字段需手工补。'),
+      docUploading ? h('div', { style: { ...S.muted, marginTop: 8 } }, '正在上传并解析…') : null,
+      docs
+        ? h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 6, marginTop: 10 } },
+          h(Chip, null, `共 ${docs.total ?? 0} 条`),
+          h(Chip, { tone: (docs.verified ?? 0) > 0 ? 'success' : undefined }, `已确认 ${docs.verified ?? 0}`),
+          Object.entries(docs.byCategory ?? {}).map(([cat, n]) => h(Chip, { key: cat }, `${(docs.categories ?? {})[cat] ?? cat} ${n}`)))
+        : null),
+    docList)
+
+  return h('div', { style: S.col },
+    error ? h('div', { style: { ...S.card, borderColor: T.error, ...S.muted, color: T.error } }, error) : null,
+    notice ? h('div', { style: { ...S.card, borderColor: T.success, ...S.muted, color: T.success } }, notice) : null,
+    h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap' } },
+      h('div', { style: S.h1 }, '简历工作室'),
+      subnav),
+    body)
+}
+
+/**
+ * Keeps one broken tab from taking the whole panel down. React error boundaries
+ * must be class components. Without this, a single bad property read unmounts the
+ * portal and the panel appears to close itself the moment it opens.
+ */
+class PanelErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+
+  componentDidCatch(error, info) {
+    try {
+      console.error('[dsh-career] panel render failed', error, info)
+    } catch {
+      /* console may be unavailable */
+    }
+  }
+
+  render() {
+    const { error } = this.state
+    if (!error) return this.props.children
+    return h('div', { style: { ...S.card, borderColor: T.error } },
+      h('div', { style: { ...S.h3, color: T.error } }, '这个页签渲染失败'),
+      h('div', { style: { ...S.mono, wordBreak: 'break-word' } }, String(error?.message ?? error)),
+      h('div', { style: { ...S.muted, marginTop: 8 } }, '其他页签仍然可用。请把上面这句错误信息发给我，方便定位。'),
+      h('div', { style: { marginTop: 10 } }, h(Btn, { onClick: () => this.setState({ error: null }) }, '重试')))
+  }
+}
+
+function Panel({ onClose }) {
+  const [tab, setTab] = useState('overview')
+  const [focusCode, setFocusCode] = useState(null)
+  const [focusNote, setFocusNote] = useState(null)
+  const [version, setVersion] = useState(0)
+  const bootstrap = useApi('/bootstrap', [version])
+  const bump = useCallback(() => setVersion((v) => v + 1), [])
+
+  // Live channel: agent tool calls and panel navigation from the conversation.
+  useEffect(() => {
+    let source
+    try {
+      source = new EventSource(`${API}/events`)
+      source.addEventListener('navigate', (event) => {
+        try {
+          const payload = JSON.parse(event.data)
+          const map = {
+            overview: 'overview', home: 'overview', plan: 'plan', career: 'plan',
+            resume: 'resume', industry: 'industry',
+            radar: 'radar', quotes: 'radar', company: 'company', social: 'social',
+            tracker: 'tracker', applications: 'tracker', interview: 'interview', settings: 'settings',
+          }
+          const next = map[payload.tab] ?? 'overview'
+          setTab(next)
+          setFocusCode(payload.code ?? null)
+          setFocusNote(payload.note ?? null)
+        } catch {
+          /* ignore malformed frames */
+        }
+      })
+      for (const kind of ['jobs', 'applications', 'resume', 'profile', 'monitor', 'company', 'social', 'reports']) {
+        source.addEventListener(kind, () => bump())
+      }
+    } catch {
+      /* EventSource unavailable: the panel still works with manual refresh */
+    }
+    return () => {
+      try {
+        source?.close()
+      } catch {
+        /* ignore */
+      }
+    }
+  }, [bump])
+
+  const data = bootstrap.data
+  const content = () => {
+    switch (tab) {
+      case 'plan': return h(PlanTab, { onChanged: bump })
+      case 'studio': return h(StudioTab, { onChanged: bump })
+      case 'resume': return h(ResumeTab, { bootstrap: data, onChanged: bump })
+      case 'radar': return h(RadarTab, { focusCode, onChanged: bump })
+      case 'tracker': return h(TrackerTab, { bootstrap: data, onChanged: bump })
+      case 'company': return h(CompanyTab)
+      case 'industry': return h(IndustryTab)
+      case 'social': return h(SocialTab)
+      case 'interview': return h(InterviewTab)
+      case 'settings': return h(SettingsTab, { bootstrap: data, onChanged: bump })
+      default: return h(OverviewTab, { bootstrap: data, onNavigate: setTab, onRefresh: bump })
+    }
+  }
+
+  return createPortal(
+    h('div', { className: 'careeros-root', style: { position: 'fixed', inset: 0, zIndex: 2147483000, background: 'rgba(15,23,42,0.35)', backdropFilter: 'blur(2px)', display: 'flex' } },
+      h(GlobalStyles),
+      h('div', {
+        style: {
+          position: 'absolute', inset: '3vh 3vw', background: T.bg, borderRadius: 14, border: `1px solid ${T.border}`,
+          display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '0 24px 60px rgba(15,23,42,0.28)',
+        },
+      },
+        h('div', { style: { ...S.row, justifyContent: 'space-between', padding: '12px 16px', borderBottom: `1px solid ${T.border}`, background: T.surface } },
+          h('div', { style: S.row },
+            h('span', { style: { fontSize: 16 } }, '🎯'),
+            h('div', null,
+              h('div', { style: S.h1 }, 'CareerOS'),
+              h('div', { style: { ...S.muted, fontSize: 11 } }, '个人求职情报与实习管理系统 · 数据仅存本机'))),
+          h('div', { style: S.row },
+            bootstrap.loading ? h(Chip, null, '同步中…') : null,
+            h(Btn, { kind: 'ghost', onClick: bump }, '刷新'),
+            h(Btn, { kind: 'ghost', onClick: onClose }, '关闭'))),
+        h('div', { style: { display: 'flex', flex: 1, minHeight: 0 } },
+          h('nav', { className: 'careeros-nav', style: { width: 176, flex: '0 0 auto', borderRight: `1px solid ${T.border}`, background: T.surface, padding: 10, display: 'flex', flexDirection: 'column', gap: 3, overflowY: 'auto' } },
+            TABS.map((t) => h('button', {
+              key: t.key, type: 'button', onClick: () => setTab(t.key),
+              style: {
+                ...S.btn(tab === t.key ? 'primary' : 'ghost'),
+                justifyContent: 'flex-start', display: 'flex', alignItems: 'center', gap: 8,
+                border: 'none', background: tab === t.key ? 'rgba(37,99,235,0.12)' : 'transparent',
+                color: tab === t.key ? T.accent : T.text, fontWeight: tab === t.key ? 650 : 500,
+              },
+            }, h('span', { style: { opacity: 0.7 } }, t.icon), t.label)),
+            h('div', { style: { marginTop: 'auto', paddingTop: 10, ...S.muted, fontSize: 10.5, lineHeight: 1.5 } },
+              '对话里让 Agent 调用 career_* 工具，面板会实时刷新。')),
+          h('main', { style: { flex: 1, minWidth: 0, overflowY: 'auto', padding: 16 } },
+            focusNote ? h('div', { style: { ...S.cardTight, marginBottom: 10, borderColor: T.accent, background: 'rgba(37,99,235,0.06)', ...S.body } }, `Agent：${focusNote}`) : null,
+            bootstrap.error
+              ? h(ErrorBox, { error: bootstrap.error, onRetry: bump })
+              : bootstrap.loading && !data
+                ? h(Loading, { label: '正在读取本地数据库…' })
+                : h(PanelErrorBoundary, { key: tab }, content()),
+          ),
+        ),
+      ),
+    ),
+    document.body,
+  )
+}
+
+// ─── entry points ────────────────────────────────────────────────────────────
+function readOpenState() {
+  try {
+    return window.localStorage.getItem('careeros:open') === '1'
+  } catch {
+    return false
+  }
+}
+
+function FootAction(props) {
+  const [open, setOpen] = useState(readOpenState)
+  const wide = props?.wide === true
+  const toggle = (next) => {
+    setOpen(next)
+    try {
+      window.localStorage.setItem('careeros:open', next ? '1' : '0')
+    } catch {
+      /* storage may be unavailable */
+    }
+  }
+  return h('div', null,
+    h('button', {
+      type: 'button', title: '求职面板 CareerOS', onClick: () => toggle(!open),
+      style: {
+        display: 'flex', alignItems: 'center', boxSizing: 'border-box', cursor: 'pointer',
+        border: 'none', overflow: 'hidden', fontFamily: 'inherit',
+        background: open ? T.surface2 : 'transparent', color: T.text,
+        ...(wide
+          ? { gap: 8, width: 'calc(100% + 4px)', height: 42, margin: '4px -2px', padding: '0 10px 0 8px', borderRadius: 12, fontSize: 14, lineHeight: '22px', justifyContent: 'flex-start' }
+          : { gap: 0, width: 36, height: 36, margin: '8px 0 10px', padding: 0, borderRadius: '50%', justifyContent: 'center' }),
+      },
+    }, h('span', { style: { fontSize: wide ? 15 : 17, lineHeight: 1 } }, '🎯'), wide ? h('span', { style: { overflow: 'hidden', whiteSpace: 'nowrap' } }, '求职面板') : null),
+    open ? h(Panel, { onClose: () => toggle(false) }) : null)
+}
+
+function SettingsCard() {
+  return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, padding: 8, fontSize: 13, color: T.text } },
+    h('h3', { style: { margin: 0 } }, 'CareerOS'),
+    h('p', { style: { margin: 0, ...S.muted } }, '个人求职情报与实习管理系统：简历与画像、岗位雷达、可解释匹配、投递 CRM、公司与行业研究、论坛情报、面试准备与监控提醒。'),
+    h('p', { style: { margin: 0, ...S.muted } }, '所有数据保存在本机 SQLite；不会自动投递简历或对外发信。第三方招聘平台与论坛受登录与反爬限制，系统只提供手动导入与搜索入口。'))
+}
+
+const name = 'dsh-career-client'
+const inject = ['slots']
+
+function apply(ctx) {
+  const safe = (label, fn) => {
+    try {
+      fn()
+    } catch (err) {
+      try {
+        console.warn(`[dsh-career] ${label} failed`, err)
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  safe('sidebar.footer.action', () => {
+    ctx.slots.inject('sidebar.footer.action', function* () {
+      yield ctx.slots.register({ name: 'sidebar.footer.action', id: 'dsh-career' }, (props) => h(FootAction, props))
+    })
+  })
+
+  safe('settings.plugins.tab', () => {
+    ctx.slots.inject('settings.plugins.tab', function* () {
+      yield ctx.slots.register({ name: 'settings.plugins.tab', id: 'dsh-career', order: 30, label: 'CareerOS' }, () => h(SettingsCard, null))
+    })
+  })
+}
+
+module.exports = {
+  name,
+  inject,
+  apply,
+  // Test hooks: lets tests/render.test.mjs execute the real component tree with a
+  // stub React runtime (no browser needed) so a render error is caught before ship.
+  __internals: {
+    Panel,
+    PanelErrorBoundary,
+    FootAction,
+    SettingsCard,
+    OverviewTab,
+    PlanTab,
+    StudioTab,
+    ResumeTab,
+    RadarTab,
+    TrackerTab,
+    CompanyTab,
+    IndustryTab,
+    SocialTab,
+    InterviewTab,
+    SettingsTab,
+    TABS,
+  },
+}

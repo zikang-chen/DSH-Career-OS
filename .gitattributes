@@ -1,0 +1,11 @@
+# 统一换行：仓库里存 LF，检出时按平台转换
+* text=auto eol=lf
+
+# 二进制文件不做文本转换
+*.png binary
+*.jpg binary
+*.pdf binary
+*.svg text
+
+# 生成的 client bundle 在 diff 里不该被折叠成一行
+client/wrapped-bundle.js linguist-generated=true

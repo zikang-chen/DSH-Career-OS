@@ -1,0 +1,27 @@
+# CareerOS bundle patch. Installed into the profile by `plugin_manager install_bundle`.
+- insert:
+    - id: dsh-career
+      name: dsh-career
+      config:
+        # 本地数据目录：SQLite 库、简历原文、LaTeX 编译产物、导出文件都在这里。
+        # 所有数据只存本机。
+        dataDir: D:/career_os/data
+        # 采集/请求节流，避免对公开页面造成压力。
+        httpGapMs: 2500
+        httpTimeoutMs: 20000
+        # 面板开关（客户端另有 localStorage 兜底）。
+        panelOpen: false
+        # 后台监控：默认关闭自动轮转，只在你显式开启或手动触发时联网。
+        scheduleEnabled: false
+        dailyHour: 9
+        # PDF/文档解析用的 Python 解释器；PDF 依赖装在项目内 runtime/pylib。
+        pythonPath: python
+
+# 修 DSH `web` 服务的选择歧义：fetch 侧同时注册了 deepseek-fetch-api 与 http 两个
+# 提供方，不显式指定就会报 "multiple usable web providers are registered"。
+# Loader 的 override 会整体替换 config，所以 searchProvider 必须一并写上，
+# 否则会把 dsh-finance 注册的搜索提供方覆盖掉。
+- id: web
+  config:
+    searchProvider: dsh-web-search
+    fetchProvider: http

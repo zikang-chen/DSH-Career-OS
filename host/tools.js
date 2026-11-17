@@ -1,0 +1,1825 @@
+// Agent-facing tools. Every tool returns a JSON string; long text lives in Markdown
+// fields so the model can quote it without re-fetching.
+import fs from 'node:fs'
+import path from 'node:path'
+import { APPLICATION_LABEL, APPLICATION_STATUSES, INTERNSHIP_LABEL, JOB_STATUSES, MATCH_BANDS, RECRUIT_LABEL, RECRUIT_TYPES, STATUS_LABEL, analyzeMatch, extractSkills } from './domain.js'
+import { crawlListing, postingToJob } from './crawl.js'
+import { ATS_SPECS, detectAts, fetchAtsPostings } from './ats.js'
+import { buildRetrievalGuide, guideInline } from './guide.js'
+import { installPdfLibs, runtimeHealth } from './runtime.js'
+import { compileTex, detectEngines, renderResumeTex, renderResumeText } from './latex.js'
+import { KIND_LABEL, planTailor, sectionsFromSelection, suggestKindOrder } from './tailor.js'
+import { auditVault, planMerge } from './merge.js'
+import { DOC_LABEL, planDocumentSelection, proposeDocument, renderDocumentLines } from './documents.js'
+import { extractResumeText, parseResume, proposalToProfilePatch } from './resume.js'
+import { parsePastedJob, suggestSocialQueries } from './sources.js'
+import { buildBrief, buildPlan, buildTimeline, seasonRuleSet } from './plan.js'
+import { arr, nowIso, parseJson, str, today } from './util.js'
+
+const json = (value) => {
+  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+  return text
+}
+
+/**
+ * Build a registry-ready tool definition. `output.schema` is a raw supported JSON
+ * Schema; `parameters` is an object-rooted property map.
+ */
+function makeTool({ name, description, params = {}, required = [], handler }) {
+  return {
+    name,
+    description,
+    parameters: { type: 'object', properties: params, ...(required.length ? { required } : {}) },
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }],
+    },
+    async execute(args) {
+      const result = await handler(args ?? {})
+      return json(result)
+    },
+  }
+}
+
+const S = (description) => ({ type: 'string', description })
+const N = (description) => ({ type: 'number', description })
+const B = (description) => ({ type: 'boolean', description })
+const SA = (description) => ({ type: 'array', items: { type: 'string' }, description })
+
+export function registerCareerTools(ctx, deps) {
+  const { repos, config, monitor, panel, logger } = deps
+  const registered = []
+  const add = (definition) => {
+    ctx.tools.register(definition)
+    registered.push(definition.name)
+  }
+
+  // ── system / profile ───────────────────────────────────────────────────────
+  add(makeTool({
+    name: 'career_status',
+    description: 'CareerOS 总览：数据库与 schema 版本、画像完成度、岗位/投递/提醒计数、数据源健康状态。每次开始求职相关对话或排查问题先调用。',
+    params: {},
+    handler: () => {
+      const db = repos.db.info()
+      return {
+        ok: true,
+        db,
+        profileCompleteness: repos.profile.completeness(),
+        jobStats: repos.jobs.stats(),
+        applicationStats: repos.applications.stats(),
+        unreadNotifications: repos.monitor.unreadCount(),
+        sources: repos.monitor.listSources().map((s) => ({
+          connector: s.connector, displayName: s.display_name, accessMode: s.access_mode,
+          enabled: s.enabled, needsUser: s.needsUser, lastOkAt: s.last_ok_at, lastError: s.last_error,
+          rateLimitNote: s.rate_limit_note, capabilities: s.capabilities,
+        })),
+        tools: registered.slice(),
+        dataDir: config.dataDir,
+        limits: {
+          supportedResumeFormats: ['.md', '.txt', '.docx', '.pdf'],
+          blockedSources: '第三方招聘平台与论坛需登录/反爬，系统不抓取；用 career_forum_import 手动导入。',
+        },
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_profile_get',
+    description: '读取求职画像与偏好（学历、毕业时间、可实习时间、目标行业/岗位/城市、技能、排除条件），并返回完成度清单。个性化建议前必须先看它。',
+    params: {},
+    handler: () => {
+      const profile = repos.profile.get()
+      const active = repos.profile.activeResume()
+      return {
+        ok: true,
+        profile,
+        completeness: repos.profile.completeness(),
+        activeResume: active ? { id: active.id, label: active.label, parseStatus: active.parse_status, chars: (active.raw_text ?? '').length } : null,
+        resumeVersions: repos.profile.listResumes(),
+        caveat: '画像里没写的字段一律是 null，不要替用户猜测或补全。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_profile_update',
+    description: '更新求职画像/偏好。字段全部可选，只改传入的字段。skills 传 [{name,level,years,verified}]；preferences 可含 weights 覆盖匹配权重。',
+    params: {
+      displayName: S('姓名/显示名'),
+      headline: S('一句话定位，如「计算机大三 · 找产品实习」'),
+      school: S('学校'), degree: S('学历：本科/硕士/博士'), major: S('专业'),
+      gradYear: N('毕业年份，如 2027'),
+      availabilityStart: S('可开始实习日期 YYYY-MM-DD'), availabilityEnd: S('可实习结束日期'),
+      weeklyDays: N('每周可出勤天数 1-7'),
+      internshipTypes: SA('期望实习类型：daily/summer/winter/long/short/other'),
+      cities: SA('目标城市'),
+      remotePref: S('onsite|remote|hybrid|any'),
+      targetIndustries: SA('目标行业'), targetRoles: SA('目标岗位方向'), targetCompanies: SA('目标企业'),
+      excluded: SA('排除条件，如「销售」「单休」「不提供转正」'),
+      salaryMin: N('期望日薪/月薪下限（数字，仅用于筛选）'),
+      skills: { type: 'array', items: { type: 'object' }, description: '技能数组 [{name,level,years,verified}]' },
+      preferences: { type: 'object', description: '偏好与权重 {weights:{qualification,experience,interest,logistics,growth,freshness}}' },
+      onboarded: B('是否完成引导'),
+    },
+    handler: (args) => {
+      const updated = repos.profile.update(args)
+      if (Array.isArray(args.skills)) {
+        for (const s of args.skills) {
+          if (s?.name) repos.profile.upsertSkill({ name: s.name, level: s.level, years: s.years, verified: s.verified === true })
+        }
+        repos.profile.syncProfileSkills()
+      }
+      repos.profile.update({ onboarded: repos.profile.completeness().percent >= 70 })
+      return { ok: true, profile: repos.profile.get(), completeness: repos.profile.completeness(), note: '画像已更新；重新运行 career_match_rank 可刷新岗位排序。', _updated: Boolean(updated) }
+    },
+  }))
+
+  // ── resume ─────────────────────────────────────────────────────────────────
+  add(makeTool({
+    name: 'career_resume_import',
+    description: '导入简历：给 path（.md/.txt/.docx/.pdf）或直接给 text。返回「解析候选」，不会自动写入画像——必须让用户确认后再调用 career_profile_update 落库。绝不编造经历。',
+    params: {
+      path: S('简历文件绝对路径'),
+      text: S('直接粘贴的简历全文'),
+      label: S('版本标签，如「产品方向-v1」'),
+      targetRole: S('该版本针对的岗位'),
+      language: S('zh 或 en'),
+      setActive: B('是否设为当前版本，默认 true'),
+    },
+    required: [],
+    async handler(args) {
+      let text = str(args.text, 400000)
+      let format = 'text'
+      let notes = []
+      let fileName = null
+      if (!text) {
+        if (!args.path) throw new Error('需要 path 或 text')
+        const extracted = await extractResumeText(String(args.path), { pythonPath: config.pythonPath, timeoutMs: config.httpTimeoutMs })
+        if (!extracted.ok) {
+          return {
+            ok: false,
+            error: extracted.error ?? '简历文本提取失败',
+            notes: extracted.notes,
+            fallback: '请让用户把简历文本粘贴进对话（text 参数），或用文档转换能力把原文件转成 .docx/.md 再导入。',
+          }
+        }
+        text = extracted.text
+        format = extracted.format ?? format
+        notes = extracted.notes ?? []
+        fileName = String(args.path).split(/[\\/]/).pop()
+      }
+      const proposal = parseResume(text, { fileName })
+      const resume = repos.profile.addResume({
+        label: args.label ?? fileName ?? undefined,
+        targetRole: args.targetRole,
+        language: args.language,
+        fileName,
+        filePath: args.path ?? null,
+        mime: format,
+        rawText: text,
+        parsed: proposal,
+        parseStatus: proposal.confidence >= 0.5 ? 'needs_review' : 'needs_review',
+        parseNotes: [...notes, ...proposal.notes].join('；') || null,
+        setActive: args.setActive !== false,
+      })
+      return {
+        ok: true,
+        resumeId: resume.id,
+        format,
+        chars: text.length,
+        notes,
+        proposal,
+        suggestedProfilePatch: proposalToProfilePatch(proposal),
+        next: '把 proposal 读给用户确认（逐项列出不确定的地方），确认后才调用 career_profile_update 写入；未确认的内容不得当作事实引用。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_resume_list',
+    description: '列出简历版本（含当前激活版本、解析状态、字符数）。',
+    params: {},
+    handler: () => ({ ok: true, versions: repos.profile.listResumes(), activeId: repos.profile.activeResume()?.id ?? null }),
+  }))
+
+  add(makeTool({
+    name: 'career_resume_delete',
+    description: '删除一个简历版本（原文与解析结果一起删）。素材库里的经历不受影响。用于清理演示/导错的版本。',
+    params: { id: S('简历版本 id') },
+    required: ['id'],
+    handler: (args) => {
+      const ok = repos.profile.deleteResume(String(args.id))
+      panel.publish({ kind: 'resume', resumeId: null })
+      return { ok, deleted: ok }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_resume_activate',
+    description: '切换当前使用的简历版本。',
+    params: { id: S('简历版本 id') },
+    required: ['id'],
+    handler: (args) => {
+      const resume = repos.profile.setActiveResume(String(args.id))
+      if (!resume) throw new Error('简历版本不存在')
+      return { ok: true, active: { id: resume.id, label: resume.label } }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_resume_compare',
+    description: '对比两个简历版本的文本差异（新增/删除的行）。',
+    params: { aId: S('版本 A id'), bId: S('版本 B id') },
+    required: ['aId', 'bId'],
+    handler: (args) => ({ ok: true, ...repos.profile.compareResumes(String(args.aId), String(args.bId)) }),
+  }))
+
+  add(makeTool({
+    name: 'career_resume_match',
+    description: 'JD × 简历匹配分析：给出命中/缺失关键词、硬性资格缺口、需要突出的经历，并生成定制建议。只基于简历已有内容，不得编造。',
+    params: { jd: S('岗位 JD 文本'), jobId: S('或给出库里岗位 id'), resumeId: S('指定简历版本，默认当前版本') },
+    handler: (args) => {
+      let jd = str(args.jd, 40000)
+      let job = null
+      if (!jd && args.jobId) {
+        job = repos.jobs.getJob(String(args.jobId))
+        if (!job) throw new Error('岗位不存在')
+        jd = `${job.title}\n${job.description ?? ''}\n${job.requirements ?? ''}`
+      }
+      if (!jd) throw new Error('需要 jd 或 jobId')
+      const resume = args.resumeId ? repos.profile.getResume(String(args.resumeId)) : repos.profile.activeResume()
+      if (!resume) throw new Error('还没有简历版本，先 career_resume_import')
+      const resumeText = `${resume.raw_text ?? ''}\n${JSON.stringify(resume.parsed ?? {})}`
+      const jdSkills = extractSkills(jd)
+      const resumeSkills = new Set(extractSkills(resumeText).map((s) => s.toLowerCase()))
+      const hit = jdSkills.filter((s) => resumeSkills.has(s.toLowerCase()))
+      const gaps = jdSkills.filter((s) => !resumeSkills.has(s.toLowerCase()))
+      const profile = repos.profile.get()
+      return {
+        ok: true,
+        resumeVersion: { id: resume.id, label: resume.label },
+        job: job ? { id: job.id, title: job.title, company: job.company_name } : null,
+        jdSkills,
+        matched: hit,
+        gaps,
+        gapActions: gaps.slice(0, 8).map((g) => `补强 ${g}：用真实做过的课程/项目/实习把这项写具体，没有就不要写`),
+        profileGaps: [profile.school ? null : '画像缺少学校', profile.grad_year ? null : '画像缺毕业年份'].filter(Boolean),
+        wording: '匹配分析只说明「简历与 JD 的字面/能力覆盖」，不代表通过率；不要承诺结果。',
+        next: '输出「改哪几句、加哪个项目、删哪句虚话」的具体建议，并注明哪些是已知事实、哪些需要用户补充。',
+      }
+    },
+  }))
+
+  // ── jobs ───────────────────────────────────────────────────────────────────
+  add(makeTool({
+    name: 'career_job_save',
+    description: '保存/合并一个岗位。可传结构化字段，也可传 jdText 让系统解析。自动做公司归一化+岗位去重；重复岗位会合并来源而不是新建。official=true 表示来自官方招聘页（可更新招聘状态）。',
+    params: {
+      company: S('公司名（必填）'), title: S('岗位名（必填）'),
+      jdText: S('岗位 JD 原文，用于解析地点/技能/截止日等'),
+      location: S('工作地点'), department: S('部门/团队'), businessUnit: S('业务线'),
+      url: S('岗位原始链接'), jobCode: S('官方岗位编号'),
+      internshipType: S('daily|summer|winter|long|short|other'),
+      remoteType: S('onsite|remote|hybrid'),
+      daysPerWeek: N('每周出勤天数'), deadline: S('截止日期 YYYY-MM-DD'),
+      gradeLimit: S('年级/毕业年限要求'), salaryText: S('薪酬（公开且可验证才填）'),
+      description: S('岗位描述'), requirements: S('招聘要求'),
+      recruitType: S('秋招=autumn_campus / 春招=spring_campus / summer / daily / other'),
+      applyUrl: S('投递地址（申请页 URL）'),
+      skills: SA('技能要求'), tags: SA('标签'),
+      status: S('招聘状态：OPEN/CLOSED/UPCOMING/UNVERIFIED/STALE/UNKNOWN'),
+      official: B('是否官方来源'),
+      conversionPossible: B('是否公开说明有转正机会（未知就不要传）'),
+      sourceName: S('来源名称，如「字节跳动招聘官网」'),
+    },
+    required: ['company', 'title'],
+    handler: (args) => {
+      let payload = { ...args }
+      if (args.jdText) {
+        const parsed = parsePastedJob(String(args.jdText), args)
+        payload = { ...parsed, ...Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined && v !== null && v !== '')), company: args.company, title: args.title }
+      }
+      const result = repos.jobs.upsertJob(payload, {
+        official: args.official === true,
+        source: { sourceType: args.official ? 'official_careers' : 'manual', sourceName: args.sourceName, url: args.url },
+      })
+      const job = repos.jobs.getJob(result.id)
+      return {
+        ok: true,
+        created: result.created,
+        mergedBy: result.reason,
+        statusChange: result.statusChange,
+        job: { id: job.id, title: job.title, company: job.company_name, location: job.location, status: job.status, statusVerifiedAt: job.status_verified_at, deadline: job.deadline, skills: job.skills },
+        note: result.created ? '新岗位已入库' : '已合并到已有岗位（来源已追加）',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_job_search',
+    description: '检索岗位库：自然语言关键词 + 结构化筛选（公司/城市/状态/实习类型/技能/最低匹配分/截止日）。返回时说明检索范围与未覆盖渠道。',
+    params: {
+      query: S('关键词，如「AI 产品 北京」'),
+      company: S('公司名过滤'), location: S('城市过滤'),
+      status: SA('招聘状态过滤'), internshipType: SA('实习类型过滤'),
+      skill: S('技能关键词'), minScore: N('最低匹配分'), deadlineBefore: S('截止日期早于 YYYY-MM-DD'),
+      limit: N('返回条数，默认 30'),
+    },
+    handler: (args) => {
+      const profile = repos.profile.getWithResume()
+      const rows = repos.jobs.listJobs({ ...args, limit: args.limit ?? 30 }, profile)
+      return {
+        ok: true,
+        count: rows.length,
+        scope: {
+          searchedFields: ['岗位标题', '公司', '地点', 'JD 描述', '招聘要求'],
+          sourcesCovered: '仅本地已入库岗位（来源见每条的 provenance）；未访问任何第三方招聘平台',
+          caveat: '库外岗位不在结果内。需要新岗位请用 career_jobs_sync 或手动粘贴。',
+        },
+        jobs: rows.map((j) => ({
+          id: j.id, company: j.company_name, title: j.title, location: j.location,
+          internshipType: INTERNSHIP_LABEL[j.internship_type] ?? j.internship_type,
+          status: j.status, statusLabel: STATUS_LABEL[j.status] ?? j.status,
+          statusVerifiedAt: j.status_verified_at, deadline: j.deadline,
+          matchScore: j.match_score, url: j.source_url ?? null, skills: j.skills,
+        })),
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_job_get',
+    description: '岗位详情：字段全量 + 来源证据 + 状态变更历史 + 匹配解释 + 关联投递。解读岗位前用它。',
+    params: { id: S('岗位 id') },
+    required: ['id'],
+    handler: (args) => {
+      const job = repos.jobs.getJob(String(args.id))
+      if (!job) throw new Error('岗位不存在')
+      return { ok: true, job: job, statusLabel: STATUS_LABEL[job.status] }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_job_verify',
+    description: '记录一次招聘状态核验。官方来源（company careers 页面）可把状态改为 OPEN/CLOSED/UPCOMING；非官方来源只能把 UNKNOWN 升为 UNVERIFIED，绝不会确认「仍在招」。历史不会被覆盖。',
+    params: {
+      id: S('岗位 id'),
+      status: S('OPEN/CLOSED/UPCOMING/UNVERIFIED/STALE/UNKNOWN'),
+      official: B('该证据是否来自官方招聘页'),
+      sourceUrl: S('证据链接'),
+      evidence: S('简短证据摘录（原文一句话）'),
+      note: S('备注'),
+    },
+    required: ['id', 'status'],
+    handler: (args) => {
+      if (!JOB_STATUSES.includes(String(args.status))) throw new Error(`状态必须是 ${JOB_STATUSES.join('/')}`)
+      const result = repos.jobs.applyStatusObservation(String(args.id), {
+        status: String(args.status),
+        official: args.official === true,
+        sourceType: args.official ? 'official_careers' : 'manual',
+        sourceUrl: args.sourceUrl ?? null,
+        evidence: args.evidence ?? null,
+        note: args.note ?? null,
+      })
+      if (args.sourceUrl) repos.jobs.attachSource(String(args.id), {
+        sourceType: args.official ? 'official_careers' : 'manual',
+        url: String(args.sourceUrl),
+        excerpt: args.evidence ?? null,
+        verificationStatus: args.official ? 'verified' : 'unverified',
+        claimType: args.status === 'CLOSED' ? 'job_closed' : 'job_opening',
+      })
+      return { ok: true, ...result, note: result.changed ? '状态已更新并写入历史' : '状态未变化' }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_jobs_sync',
+    description: '对已登记的公司官方招聘页做一次增量检查：读 robots.txt → 拉页面 → 对比上次快照 → 变化则生成提醒。合法、串行、有节流。第三方平台不在此列。',
+    params: { companyId: S('只检查某家公司（可选）'), autoImport: B('是否把识别到的岗位链接入库为 UNVERIFIED 岗位') },
+    async handler(args) {
+      const companies = repos.jobs.listCompanies({ limit: 500 }).filter((c) => c.careers_url || c.intern_url)
+      const selected = args.companyId ? companies.filter((c) => c.id === args.companyId) : companies
+      if (!selected.length) {
+        return {
+          ok: true, checked: 0,
+          note: '还没有登记任何官方招聘页。先用 career_company_upsert 填写 careersUrl（如 https://jobs.bytedance.com/campus），再运行同步。',
+        }
+      }
+      const results = []
+      for (const company of selected.slice(0, 12)) {
+        const url = company.careers_url || company.intern_url
+        let rule = repos.monitor.listRules().find((r) => r.kind === 'careers_page' && r.spec?.url === url)
+        if (!rule) {
+          rule = repos.monitor.createRule({
+            name: `${company.name} 招聘页`, kind: 'careers_page',
+            spec: { url, company: company.name, autoImport: args.autoImport === true },
+          })
+        }
+        results.push({ company: company.name, ...(await monitor.runRule(rule.id)) })
+      }
+      return { ok: true, checked: results.length, results, note: '只对比页面结构变化与在招信号，不抓取登录后内容。' }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_jobs_crawl',
+    description: '爬取公开岗位列表页并入库，自动带出岗位标题、工作地点、投递地址、截止日期、技能与招聘类型（秋招/春招/暑期）。优先用 schema.org JobPosting(JSON-LD)，其次页面内嵌 JSON，最后链接聚类。遵守 robots.txt、串行节流、只读公开页面。纯前端渲染(SPA)页面抓不到岗位结构时会在 warnings 里直说，不会编造岗位。',
+    params: {
+      urls: SA('一个或多个岗位列表页 URL（优先官方校招/社招页面）'),
+      company: S('公司名；页面能解析出公司时以页面为准'),
+      official: B('是否官方招聘页，默认 true；决定能否把状态标为「官方确认在招」'),
+      recruitType: S(RECRUIT_TYPES.join('|') + '；留空自动判断'),
+      maxDetail: N('为前 N 个岗位抓详情页补全 JD（默认 0，上限 20，每页串行）'),
+      dryRun: B('只抓取并预览、不入库，默认 false'),
+    },
+    required: ['urls'],
+    async handler(args) {
+      const urls = arr(args.urls).slice(0, 8)
+      if (!urls.length) throw new Error('需要至少一个 url')
+      const official = args.official !== false
+      const recruitType = args.recruitType ? String(args.recruitType) : null
+      const runId = repos.monitor.startRun('crawl', urls.join(' '))
+      const pages = []
+      let created = 0
+      let merged = 0
+      let fetched = 0
+      const failures = []
+
+      for (const url of urls) {
+        // A recognised ATS gets its official read-only API first — it is both the
+        // most reliable path and the one that yields full location/apply URLs.
+        const detected = detectAts(url)
+        let page = null
+        let usedAts = null
+        if (detected) {
+          const atsRes = await fetchAtsPostings({ ats: detected.ats, token: detected.token, timeoutMs: config.httpTimeoutMs })
+          if (atsRes.ok) {
+            usedAts = { ats: detected.ats, label: detected.spec.label, token: detected.token, apiUrl: atsRes.apiUrl }
+            page = {
+              ok: true,
+              url: atsRes.apiUrl,
+              strategy: `ats:${detected.ats}`,
+              postings: atsRes.postings,
+              warnings: [`通过 ${detected.spec.label} 公开只读接口读取（无需登录）。`],
+              signals: { open: true },
+            }
+          } else {
+            page = await crawlListing(url, {
+              timeoutMs: config.httpTimeoutMs,
+              gapMs: config.httpGapMs,
+              maxDetail: Number(args.maxDetail ?? 0),
+            })
+            page.warnings = [...(page.warnings ?? []), `先试了 ${detected.spec.label} 接口但失败：${atsRes.error}`]
+          }
+        } else {
+          page = await crawlListing(url, {
+            timeoutMs: config.httpTimeoutMs,
+            gapMs: config.httpGapMs,
+            maxDetail: Number(args.maxDetail ?? 0),
+          })
+        }
+        fetched += page.postings?.length ?? 0
+        if (!page.ok) {
+          failures.push({ url, error: page.error })
+          pages.push({
+            url, ok: false, error: page.error, postings: [],
+            guide: guideInline({ company: args.company, url }),
+          })
+          continue
+        }
+        const normalized = page.postings.map((posting) => postingToJob(posting, { company: args.company, pageUrl: page.url }))
+        // A page we could not turn into postings still owes the user exact next steps.
+        const guide = page.strategy === 'none'
+          ? guideInline({ company: args.company, url })
+          : null
+        if (args.dryRun === true) {
+          pages.push({
+            url: page.url, ok: true, strategy: page.strategy, count: normalized.length,
+            warnings: page.warnings, signals: page.signals, ats: usedAts, guide,
+            preview: normalized.slice(0, 60).map((j) => ({
+              title: j.title, company: j.company, location: j.location,
+              recruitType: j.recruitType, deadline: j.deadline, applyUrl: j.applyUrl,
+              skills: (j.skills ?? []).slice(0, 6),
+            })),
+          })
+          continue
+        }
+        const imported = repos.jobs.importPostings(normalized, {
+          company: args.company,
+          pageUrl: page.url,
+          official,
+          recruitType,
+          sourceName: official ? '官方招聘页（爬取）' : '第三方页面（爬取）',
+        })
+        created += imported.created.length
+        merged += imported.merged.length
+        for (const f of imported.failed) failures.push({ url: page.url, error: f.error, title: f.title })
+        pages.push({
+          url: page.url, ok: true, strategy: page.strategy, count: normalized.length,
+          created: imported.created.length, merged: imported.merged.length,
+          warnings: page.warnings, signals: page.signals, ats: usedAts, guide,
+          sample: normalized.slice(0, 10).map((j) => ({ title: j.title, location: j.location, applyUrl: j.applyUrl })),
+        })
+      }
+
+      const status = failures.length && !created && !merged ? 'error' : 'ok'
+      repos.monitor.finishRun(runId, {
+        status,
+        fetched,
+        inserted: created,
+        updated: merged,
+        error: failures.length ? failures.slice(0, 3).map((f) => `${f.url}: ${f.error}`).join(' | ') : null,
+        meta: { urls: urls.length, strategy: pages.map((p) => p.strategy ?? null) },
+      })
+      repos.monitor.recordSourceResult(official ? 'official_careers' : 'job_board', {
+        ok: status === 'ok', error: failures[0]?.error, fetched, inserted: created, official: official ? created : 0,
+      })
+      return {
+        ok: status === 'ok',
+        dryRun: args.dryRun === true,
+        pages,
+        totals: { pages: urls.length, fetched, created, merged, failed: failures.length },
+        failures: failures.slice(0, 10),
+        policy: '只抓取 robots.txt 允许的公开页面；不登录、不带 Cookie、不绕过任何访问控制。',
+        next: args.dryRun === true
+          ? '把 preview 给用户确认后再用 dryRun=false 入库。'
+          : '入库后用 career_match_rank 重算排序；投递地址见每条 applyUrl。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_source_guide',
+    description: '取数指引：告诉用户「这个公司的岗位到底去哪儿拿、复制哪个地址给我」。如果识别出公司用的是 Greenhouse/Lever/Ashby/SmartRecruiters/Workday，直接给出可用的公开接口地址；否则给出精确步骤（打开哪个页面、F12 怎么找返回岗位 JSON 的请求、复制哪一项），以及候选招聘入口和不支持自动采集的平台的检索链接。',
+    params: {
+      company: S('公司名'),
+      url: S('已知的招聘页地址（可选；给了能直接判断是不是标准招聘系统）'),
+      role: S('岗位方向（用于生成论坛检索词）'),
+      year: N('年份（用于生成检索词）'),
+      careersUrl: S('公司档案里登记的招聘入口（可选）'),
+    },
+    handler: (args) => {
+      let careersUrl = args.careersUrl ? String(args.careersUrl) : null
+      if (!careersUrl && args.company) {
+        const company = repos.jobs.resolveCompany(String(args.company), false)
+        if (company?.careers_url) careersUrl = company.careers_url
+      }
+      const guide = buildRetrievalGuide({
+        company: args.company, url: args.url, role: args.role,
+        year: args.year, careersUrl,
+      })
+      return { ok: true, ...guide, atsSpecs: ATS_SPECS }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_selfcheck',
+    description: '环境自检：Python 解释器、PDF 解析依赖（项目内隔离 runtime/pylib）、LaTeX 引擎、Web 搜索/抓取提供方、SQLite、浏览器半是否进入 boot graph。排查「为什么导不进来 / 为什么编译不了 / 为什么搜不到」时先跑它。',
+    params: {},
+    async handler() {
+      const health = await runtimeHealth({ config, db: repos.db, clientHealth: deps.clientHealth, webService: deps.webService })
+      const failing = health.checks.filter((c) => !c.done)
+      return {
+        ...health,
+        ok: failing.length === 0,
+        failing,
+        fixHint: failing.length
+          ? '缺 PDF 依赖可调 career_runtime_setup 一键装到项目内；缺 LaTeX 需自行安装 MiKTeX/TeXLive；Web 搜索提供方缺失通常是别的插件没激活。'
+          : '全部就绪。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_runtime_setup',
+    description: '把 PDF 解析依赖（pdfminer.six、pypdf）一键装到项目内的 runtime/pylib（pip --target），不修改用户全局 Python 环境。装完重试导入简历。',
+    params: {},
+    async handler() {
+      const result = await installPdfLibs(config.pythonPath)
+      const health = await runtimeHealth({ config, db: repos.db, clientHealth: deps.clientHealth, webService: deps.webService })
+      return {
+        ok: result.ok,
+        ...result,
+        pdfLibs: health.pdfLibs,
+        next: result.ok ? '已装好，可以直接重新导入 PDF 简历。' : '安装失败：检查网络，或手动运行 node scripts/setup-runtime.mjs',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_job_delete',
+    description: '彻底删除一个岗位（连带它的来源、状态历史、匹配结果、笔记；关联投递会保留但解除绑定）。用于清理测试/演示数据或录错的岗位。',
+    params: { id: S('岗位 id'), ids: SA('批量删除：岗位 id 列表') },
+    handler: (args) => {
+      const list = [...new Set([...(arr(args.ids) ?? []), args.id ? String(args.id) : null].filter(Boolean))]
+      if (!list.length) throw new Error('需要 id 或 ids')
+      const deleted = list.filter((id) => {
+        try {
+          return repos.jobs.deleteJob(id)
+        } catch (err) {
+          logger.warn('job delete failed', { id, error: String(err?.message ?? err) })
+          return false
+        }
+      })
+      panel.publish({ kind: 'jobs' })
+      return { ok: true, requested: list.length, deleted: deleted.length, ids: deleted }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_application_delete',
+    description: '删除一条投递记录及其时间线。用于清理演示/录错的数据。',
+    params: { id: S('投递记录 id') },
+    required: ['id'],
+    handler: (args) => {
+      const ok = repos.applications.delete(String(args.id))
+      panel.publish({ kind: 'applications' })
+      return { ok, deleted: ok }
+    },
+  }))
+
+  // ── 简历知识库 / 微调 / LaTeX ──────────────────────────────────────────────
+  const uploadDir = path.join(config.dataDir, 'resumes')
+  const saveUpload = (fileName, base64) => {
+    fs.mkdirSync(uploadDir, { recursive: true })
+    const safe = String(fileName ?? 'resume').replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 120) || 'resume'
+    const target = path.join(uploadDir, `${Date.now()}-${safe}`)
+    fs.writeFileSync(target, Buffer.from(String(base64 ?? ''), 'base64'))
+    return target
+  }
+
+  add(makeTool({
+    name: 'career_resume_upload',
+    description: '上传一份简历文件（面板会走 dataBase64；Agent 也可以直接给 path）。自动提取文本、生成解析候选、并可把识别到的经历沉淀进「素材库」。不会覆盖已有画像，确认后才写。',
+    params: {
+      fileName: S('原始文件名，如 简历-产品.pdf'),
+      dataBase64: S('文件内容的 base64（面板上传时用）'),
+      path: S('或给本机文件绝对路径'),
+      label: S('版本标签'), targetRole: S('该版本针对的岗位'),
+      language: S('zh 或 en'),
+      seedVault: B('是否把识别到的经历写入素材库，默认 true'),
+      setActive: B('是否设为当前版本，默认 true'),
+    },
+    async handler(args) {
+      let filePath = args.path ? String(args.path) : null
+      if (!filePath && args.dataBase64) filePath = saveUpload(args.fileName, args.dataBase64)
+      if (!filePath) throw new Error('需要 path 或 dataBase64')
+      const extracted = await extractResumeText(filePath, { pythonPath: config.pythonPath, timeoutMs: config.httpTimeoutMs })
+      if (!extracted.ok) {
+        return {
+          ok: false,
+          error: extracted.error ?? '简历文本提取失败',
+          notes: extracted.notes,
+          fallback: '把简历文本粘贴进对话，或用「直接粘贴」导入。',
+        }
+      }
+      const proposal = parseResume(extracted.text, { fileName: args.fileName ?? path.basename(filePath) })
+      const resume = repos.profile.addResume({
+        label: args.label ?? args.fileName ?? path.basename(filePath),
+        targetRole: args.targetRole,
+        language: args.language,
+        fileName: args.fileName ?? path.basename(filePath),
+        filePath,
+        mime: extracted.format ?? 'file',
+        rawText: extracted.text,
+        parsed: proposal,
+        parseStatus: 'needs_review',
+        parseNotes: [...(extracted.notes ?? []), ...proposal.notes].join('；') || null,
+        sourceType: 'upload',
+        setActive: args.setActive !== false,
+      })
+      let seeded = []
+      if (args.seedVault !== false) seeded = repos.profile.importExperiencesFromResume(proposal, resume.id)
+      panel.publish({ kind: 'resume', resumeId: resume.id })
+      return {
+        ok: true,
+        resumeId: resume.id,
+        format: extracted.format,
+        chars: extracted.text.length,
+        proposal,
+        seededExperiences: seeded.length,
+        suggestedProfilePatch: proposalToProfilePatch(proposal),
+        next: '核对 proposal 与素材库条目（都标了未确认），确认后再写进画像；素材库可以逐条改。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_experience_add',
+    description: '往「简历素材库」加一条详细经历（实习/项目/科研/校园/奖项/证书）。素材库是唯一事实来源，简历版本只是从这里挑选与排序，所以这里写全、写细，后面微调才有素材可用。',
+    params: {
+      kind: S('education|internship|project|research|activity|award|certificate|skill'),
+      organization: S('公司/学校/项目名'),
+      role: S('岗位/角色'),
+      startAt: S('开始时间，如 2025-07'), endAt: S('结束时间，如 2025-09'),
+      location: S('地点'),
+      bullets: SA('要点列表（每条一件事，尽量带真实数字）'),
+      tags: SA('标签，如 数据分析、B端'), skills: SA('涉及技能'),
+      links: SA('可核验链接（作品/仓库/报道）'),
+      evidence: S('可核验说明（没有就留空，不要编）'),
+      verified: B('是否已确认属实'),
+    },
+    required: ['kind'],
+    handler: (args) => ({ ok: true, experience: repos.profile.addExperience(args) }),
+  }))
+
+  add(makeTool({
+    name: 'career_experience_list',
+    description: '列出素材库里的全部详细经历（可按 kind 过滤），含每条要点的技能与是否已确认。',
+    params: { kind: S('可选：education|internship|project|research|activity|award|certificate|skill') },
+    handler: (args) => {
+      const experiences = repos.profile.listExperiences({ kind: args.kind })
+      const byKind = {}
+      for (const exp of experiences) byKind[exp.kind] = (byKind[exp.kind] ?? 0) + 1
+      return { ok: true, total: experiences.length, byKind, kindLabels: KIND_LABEL, experiences }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_experience_update',
+    description: '修改素材库里的一条经历（可只改传的字段），或删除。',
+    params: {
+      id: S('经历 id'), delete: B('设为 true 表示删除'),
+      kind: S('类型'), organization: S('公司/学校/项目名'), role: S('岗位/角色'),
+      startAt: S('开始时间'), endAt: S('结束时间'), location: S('地点'),
+      bullets: SA('要点列表'), tags: SA('标签'), skills: SA('技能'), links: SA('链接'),
+      evidence: S('可核验说明'), verified: B('是否已确认'),
+    },
+    required: ['id'],
+    handler: (args) => {
+      if (args.delete === true) return { ok: true, deleted: repos.profile.deleteExperience(String(args.id)) }
+      return { ok: true, experience: repos.profile.updateExperience(String(args.id), args) }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_resume_tailor',
+    description: '针对某个目标岗位，在素材库基础上生成一版「微调简历」：按岗位关键词挑选与排序经历、精简要点，生成 LaTeX 与纯文本两个版本，并明确列出素材库里没有的缺口。只挑选与排序，不编造任何经历。',
+    params: {
+      jobId: S('目标岗位 id（必填）'),
+      baseVersionId: S('基于哪一版微调（可选；只用于记录谱系）'),
+      label: S('新版本名称'),
+      maxEntries: N('最多保留几段经历，默认 6'),
+      bulletsPerEntry: N('每段最多几条要点，默认 4'),
+      dryRun: B('只出方案不建版本，默认 false'),
+      reason: S('这次调整的原因（写进谱系备注）'),
+    },
+    required: ['jobId'],
+    handler: (args) => {
+      const job = repos.jobs.getJob(String(args.jobId))
+      if (!job) throw new Error('目标岗位不存在')
+      const experiences = repos.profile.listExperiences()
+      if (!experiences.length) {
+        return {
+          ok: false,
+          error: '素材库为空，无法微调',
+          next: '先用面板「上传简历」导入并沉淀素材，或 career_experience_add 逐条补充。',
+        }
+      }
+      const plan = planTailor({
+        experiences,
+        job,
+        maxEntries: Number(args.maxEntries ?? 6),
+        bulletsPerEntry: Number(args.bulletsPerEntry ?? 4),
+      })
+      const profile = repos.profile.get()
+      // 章节顺序随岗位性质走：产品/市场岗把实操经历放前面，研究岗反过来。
+      const sections = sectionsFromSelection(plan.selected, suggestKindOrder(job))
+      const texSource = renderResumeTex({ profile, sections })
+      const rawText = renderResumeText({ profile, sections })
+
+      if (args.dryRun === true) {
+        return { ok: true, dryRun: true, plan, sections, texSource, bulletCount: rawText.split('\n').filter((l) => l.startsWith('- ')).length }
+      }
+
+      const label = str(args.label, 200) ?? `${job.company_name}·${job.title} 定制版`
+      const version = repos.profile.createVersionFromSections({
+        label,
+        sections,
+        profile,
+        rawText,
+        texSource,
+        parentVersionId: args.baseVersionId ?? repos.profile.activeResume()?.id ?? null,
+        targetJobId: job.id,
+        sourceType: 'tailored',
+        targetRole: job.title,
+        setActive: false,
+      })
+      panel.publish({ kind: 'resume', resumeId: version.id })
+      return {
+        ok: true,
+        versionId: version.id,
+        label,
+        targetJob: { id: job.id, company: job.company_name, title: job.title },
+        usedExperiences: plan.selected.length,
+        omittedExperiences: plan.omitted.map((o) => ({ id: o.experienceId, org: o.organization, role: o.role, reason: o.reason })),
+        gaps: plan.gaps,
+        rationale: plan.rationale,
+        warnings: plan.warnings,
+        texSource,
+        next: '版本已生成（未自动设为当前版本）。去面板「简历工作室」看 LaTeX 与 PDF，改完再 career_resume_compile。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_resume_tex',
+    description: '读取或保存某一版简历的 LaTeX 源码；给 versionId 且不传 tex 时返回源码，传 tex 时保存。也可以在没有任何 LaTeX 时用 fromVersion 从纯文本版本重新生成骨架。',
+    params: {
+      versionId: S('简历版本 id'),
+      tex: S('要保存的 LaTeX 源码（不传则读取）'),
+      regenerate: B('设为 true 时用该版本的解析结果重新生成 LaTeX 骨架'),
+      title: S('文档标题（重新生成时用）'),
+    },
+    required: ['versionId'],
+    handler: (args) => {
+      const id = String(args.versionId)
+      const resume = repos.profile.getResume(id)
+      if (!resume) throw new Error('简历版本不存在')
+      let tex = args.tex !== undefined ? String(args.tex) : null
+      if (!tex && args.regenerate === true) {
+        const sections = resume.parsed?.sections ?? []
+        tex = renderResumeTex({
+          profile: repos.profile.get(),
+          sections,
+          title: args.title ?? resume.label,
+        })
+        repos.profile.setResumeTex(id, tex)
+      }
+      if (tex !== null) {
+        repos.profile.setResumeTex(id, tex)
+        panel.publish({ kind: 'resume', resumeId: id })
+        return { ok: true, versionId: id, saved: true, chars: tex.length, tex }
+      }
+      const current = repos.profile.getResumeTex(id)
+      const engines = detectEngines()
+      return {
+        ok: true,
+        versionId: id,
+        tex: current,
+        empty: !current,
+        engines: engines.map((e) => e.engine),
+        hint: current ? '可调用 career_resume_compile 编译成 PDF。' : '这一版还没有 LaTeX 源码，用 regenerate=true 生成骨架，或在面板里直接写。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_resume_compile',
+    description: '把某一版简历的 LaTeX 编译成 PDF（本机 xelatex/lualatex/pdflatex，带 -no-shell-escape 与超时保护），返回 PDF 路径与编译日志。相同源码会复用缓存。',
+    params: { versionId: S('简历版本 id'), tex: S('可选：临时用这段 LaTeX 编译而不保存') },
+    required: ['versionId'],
+    async handler(args) {
+      const id = String(args.versionId)
+      const tex = args.tex !== undefined ? String(args.tex) : repos.profile.getResumeTex(id)
+      if (!tex) throw new Error('这一版还没有 LaTeX 源码；先 career_resume_tex regenerate=true')
+      const engines = detectEngines()
+      const result = await compileTex(tex, { dataDir: config.dataDir, timeoutMs: 60_000, preferEngine: engines[0]?.engine })
+      return {
+        ok: result.ok,
+        versionId: id,
+        engine: result.engine,
+        cached: result.cached === true,
+        ms: result.ms,
+        pdfPath: result.pdfPath ?? null,
+        error: result.error ?? null,
+        logTail: result.ok ? null : result.log,
+        availableEngines: engines.map((e) => e.engine),
+      }
+    },
+  }))
+
+  // ── 多源简历合并 → 干净素材库 ──────────────────────────────────────────────
+  const scanResumeFiles = (dir, cap = 40) => {
+    const out = []
+    const walk = (current, depth) => {
+      if (out.length >= cap || depth > 3) return
+      let entries = []
+      try {
+        entries = fs.readdirSync(current, { withFileTypes: true })
+      } catch {
+        return
+      }
+      for (const entry of entries) {
+        if (out.length >= cap) break
+        const full = path.join(current, entry.name)
+        if (entry.isDirectory()) {
+          if (/^(node_modules|\.git|System Volume Information|\$RECYCLE\.BIN)$/i.test(entry.name)) continue
+          walk(full, depth + 1)
+          continue
+        }
+        if (!entry.isFile()) continue
+        if (!/\.(pdf|docx|md|txt|json)$/i.test(entry.name)) continue
+        if (/^~\$/.test(entry.name)) continue
+        out.push(full)
+      }
+    }
+    walk(dir, 0)
+    return out
+  }
+
+  add(makeTool({
+    name: 'career_resume_ingest',
+    description: '一次性导入一堆简历：给目录（递归扫描 pdf/docx/md/txt）、给多个文件路径、或直接给多段文本。逐个提取原文并按内容去重，全部作为「源材料」存起来（不覆盖画像）。这是「我有一堆乱七八糟的简历」的入口。之后用 career_vault_plan_merge 去重合并成干净素材库。',
+    params: {
+      dir: S('目录绝对路径，递归找简历类文件（最多 40 个）'),
+      paths: SA('一个或多个文件绝对路径'),
+      texts: { type: 'array', items: { type: 'object' }, description: '直接给文本：[{label, text}]' },
+      seedVault: B('是否顺手把解析出的经历写入素材库（默认 false，建议合并时统一处理）'),
+      maxFiles: N('上限，默认 40'),
+    },
+    async handler(args) {
+      const cap = Math.min(Number(args.maxFiles ?? 40), 80)
+      const files = []
+      for (const item of arr(args.paths)) files.push(String(item))
+      if (args.dir) files.push(...scanResumeFiles(String(args.dir), cap))
+      const sources = Array.isArray(args.texts) ? args.texts : []
+      if (!files.length && !sources.length) throw new Error('需要 dir / paths / texts 之一')
+
+      const existing = new Set(repos.profile.rawSources({ maxChars: 400000 }).map((s) => normKey(s.text ?? '').slice(0, 4000)))
+      const ingested = []
+      const failed = []
+      const duplicates = []
+
+      const before = repos.profile.listResumes().length
+      for (const filePath of files.slice(0, cap)) {
+        try {
+          const extracted = await extractResumeText(filePath, { pythonPath: config.pythonPath, timeoutMs: config.httpTimeoutMs })
+          if (!extracted.ok) {
+            failed.push({ path: filePath, error: extracted.error })
+            continue
+          }
+          const fingerprint = normKey(extracted.text ?? '').slice(0, 4000)
+          if (existing.has(fingerprint)) {
+            duplicates.push({ path: filePath, reason: '与已导入的某份内容相同' })
+            continue
+          }
+          existing.add(fingerprint)
+          const proposal = parseResume(extracted.text, { fileName: path.basename(filePath) })
+          const resume = repos.profile.addResume({
+            label: path.basename(filePath),
+            fileName: path.basename(filePath),
+            filePath,
+            mime: extracted.format ?? 'file',
+            rawText: extracted.text,
+            parsed: proposal,
+            parseStatus: 'needs_review',
+            parseNotes: [...(extracted.notes ?? []), ...proposal.notes].join('；') || null,
+            sourceType: 'upload',
+            setActive: false,
+          })
+          if (args.seedVault === true) repos.profile.importExperiencesFromResume(proposal, resume.id)
+          ingested.push({
+            resumeId: resume.id,
+            fileName: path.basename(filePath),
+            format: extracted.format,
+            engine: extracted.engine ?? null,
+            chars: (extracted.text ?? '').length,
+            parseConfidence: proposal.confidence,
+          })
+        } catch (err) {
+          failed.push({ path: filePath, error: String(err?.message ?? err) })
+        }
+      }
+
+      for (const [index, item] of sources.entries()) {
+        const text = String(item?.text ?? '').trim()
+        if (!text) {
+          failed.push({ source: item?.label ?? `text#${index}`, error: '空文本' })
+          continue
+        }
+        const fingerprint = normKey(text).slice(0, 4000)
+        if (existing.has(fingerprint)) {
+          duplicates.push({ source: item?.label ?? `text#${index}`, reason: '内容重复' })
+          continue
+        }
+        existing.add(fingerprint)
+        const proposal = parseResume(text, { fileName: item?.label ?? null })
+        const resume = repos.profile.addResume({
+          label: item?.label ?? `粘贴材料 #${index + 1}`,
+          rawText: text,
+          parsed: proposal,
+          parseStatus: 'needs_review',
+          parseNotes: proposal.notes.join('；') || null,
+          sourceType: 'paste',
+          setActive: false,
+        })
+        if (args.seedVault === true) repos.profile.importExperiencesFromResume(proposal, resume.id)
+        ingested.push({ resumeId: resume.id, fileName: item?.label ?? `text#${index + 1}`, format: 'text', chars: text.length, parseConfidence: proposal.confidence })
+      }
+
+      panel.publish({ kind: 'resume', resumeId: null })
+      return {
+        ok: true,
+        ingested,
+        duplicates,
+        failed,
+        totals: { files: files.length, texts: sources.length, ingested: ingested.length, duplicate: duplicates.length, failed: failed.length, versionsBefore: before },
+        next: '下一步：career_vault_snapshot 读取所有原文与现有素材 → 自己归并成结构化经历 → career_vault_plan_merge 校验去重/冲突 → career_vault_apply 落库。原始文件都保留，合并可回溯。',
+        caveat: '解析器只做初判，学术型/排版怪异的 CV 容易被读错，所以这里只存原文，结构化靠合并环节人工把关。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_vault_snapshot',
+    description: '读取「合并工作台」全量现场：所有源材料原文（可截断）、现有素材库条目、以及库健康检查（疑似重复/空要点/未确认）。合并前先调它。',
+    params: {
+      maxCharsPerSource: N('每份源材料最多返回多少字符，默认 6000'),
+      onlyKind: S('只看某类素材'),
+    },
+    handler: (args) => {
+      const sources = repos.profile.rawSources({ maxChars: Math.min(Number(args.maxCharsPerSource ?? 6000), 30000) })
+      const experiences = repos.profile.listExperiences({ kind: args.onlyKind })
+      return {
+        ok: true,
+        sources,
+        experiences,
+        audit: auditVault(experiences),
+        counts: { sources: sources.length, experiences: experiences.length },
+        howTo: '把 sources 的原文与 experiences 对照，输出「新增/更新/冲突」三组；用 career_vault_plan_merge 让系统做确定性去重，再 career_vault_apply 落库。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_vault_plan_merge',
+    description: '合并计划（确定性、不写库）：把你从一堆简历里整理出的候选经历和现有素材库比对，输出 新增/更新（含新增要点）/批内重复/字段冲突。只合并不编造，冲突项要人来定。',
+    params: {
+      incoming: { type: 'array', items: { type: 'object' }, description: '候选经历数组，字段同 career_experience_add' },
+      allowLoose: B('允许按「同一机构」近似合并（默认 false，更保守）'),
+    },
+    required: ['incoming'],
+    handler: (args) => {
+      const incoming = (Array.isArray(args.incoming) ? args.incoming : []).map((item, index) => ({
+        ...item,
+        __sourceLabel: item?.sourceLabel ?? item?.from ?? `candidate#${index + 1}`,
+        __sourceId: item?.sourceId ?? null,
+      }))
+      const plan = planMerge({
+        existing: repos.profile.listExperiences(),
+        incoming,
+        allowLoose: args.allowLoose === true,
+      })
+      return { ok: true, ...plan, next: '确认后用 career_vault_apply 落库（可先 dryRun=true 预演）。' }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_vault_apply',
+    description: '把合并计划落库（批量、事务、可先 dryRun 预演）。creates/updates/deletes 三组；不会改动原始简历版本，素材库可再合并。',
+    params: {
+      creates: { type: 'array', items: { type: 'object' }, description: '新增条（或直接传 plan.creates）' },
+      updates: { type: 'array', items: { type: 'object' }, description: '[{id, patch}] 或直接传 plan.updates' },
+      deletes: SA('要删除的素材 id'),
+      dryRun: B('只预演不写库，默认 false'),
+    },
+    handler: (args) => {
+      const creates = (Array.isArray(args.creates) ? args.creates : []).map((c) => (c?.incoming ? c : { incoming: c }))
+      const updates = (Array.isArray(args.updates) ? args.updates : []).map((u) => ({ id: u?.id, patch: u?.patch ?? {} }))
+      const result = repos.profile.applyVaultOps({ creates, updates, deletes: arr(args.deletes) }, { dryRun: args.dryRun === true })
+      if (args.dryRun !== true) panel.publish({ kind: 'resume', resumeId: null })
+      return { ok: true, ...result, next: '落库后跑 career_vault_snapshot 复核，或直接 career_resume_build 出稿。' }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_resume_build',
+    description: '针对某个岗位从素材库出「最合适的一版简历」：按岗位关键词挑选/排序/精简，支持强制包含与排除某几段经历，生成 LaTeX + 纯文本并可存为版本。只挑选和排序，不编造内容。',
+    params: {
+      jobId: S('目标岗位 id（必填）'),
+      includeIds: SA('必须包含的素材 id'),
+      excludeIds: SA('必须排除的素材 id'),
+      maxEntries: N('最多保留几段经历，默认 6'),
+      bulletsPerEntry: N('每段最多几条要点，默认 4'),
+      includeDocs: B('是否把个人资料库里的证书/成绩按岗位相关性加进「证书与语言」，默认 true'),
+      docIds: SA('指定必须展示的资料 id'),
+      docMax: N('最多带几条资料，默认 6'),
+      label: S('新版本名称'),
+      baseVersionId: S('基于哪一版（谱系用）'),
+      save: B('是否存成简历版本，默认 true'),
+    },
+    required: ['jobId'],
+    handler: (args) => {
+      const job = repos.jobs.getJob(String(args.jobId))
+      if (!job) throw new Error('目标岗位不存在')
+      const experiences = repos.profile.listExperiences()
+      if (!experiences.length) {
+        return { ok: false, error: '素材库为空', next: '先用 career_resume_ingest 批量导入，再合并成素材库。' }
+      }
+      const plan = planTailor({
+        experiences,
+        job,
+        maxEntries: Number(args.maxEntries ?? 6),
+        bulletsPerEntry: Number(args.bulletsPerEntry ?? 4),
+        includeIds: arr(args.includeIds),
+        excludeIds: arr(args.excludeIds),
+      })
+      const profile = repos.profile.get()
+      const sections = sectionsFromSelection(plan.selected, suggestKindOrder(job))
+
+      // 证书与语言：按岗位相关性从个人资料库里挑，挑不出来就不加这一节。
+      let docPlan = null
+      if (args.includeDocs !== false) {
+        const documents = repos.profile.listDocuments({})
+        const forced = arr(args.docIds)
+        const picked = forced.length
+          ? documents.filter((doc) => forced.includes(doc.id))
+          : planDocumentSelection({ documents, job, max: Number(args.docMax ?? 6) }).selected
+            .map((row) => documents.find((doc) => doc.id === row.id))
+            .filter(Boolean)
+        const groups = renderDocumentLines(picked)
+        if (groups.length) {
+          sections.push({
+            kind: 'certificate',
+            label: '证书与语言',
+            items: groups.map((group) => ({ org: null, role: null, period: null, location: null, bullets: group.lines })),
+          })
+          docPlan = { used: picked.length, groups: groups.map((group) => ({ label: group.label, lines: group.lines })) }
+        }
+      }
+
+      const texSource = renderResumeTex({ profile, sections })
+      const rawText = renderResumeText({ profile, sections })
+      let versionId = null
+      if (args.save !== false) {
+        const label = str(args.label, 200) ?? `${job.company_name}·${job.title} 匹配版`
+        const version = repos.profile.createVersionFromSections({
+          label, sections, profile, rawText, texSource,
+          parentVersionId: args.baseVersionId ?? null,
+          targetJobId: job.id,
+          sourceType: 'tailored',
+          targetRole: job.title,
+          setActive: false,
+        })
+        versionId = version.id
+        panel.publish({ kind: 'resume', resumeId: versionId })
+      }
+      return {
+        ok: true,
+        versionId,
+        targetJob: { id: job.id, company: job.company_name, title: job.title },
+        selected: plan.selected.map((s) => ({ id: s.experienceId, org: s.organization, role: s.role, bullets: s.bullets.length })),
+        omitted: plan.omitted.map((o) => ({ id: o.experienceId, org: o.organization, reason: o.reason })),
+        gaps: plan.gaps,
+        rationale: plan.rationale,
+        warnings: plan.warnings,
+        documents: docPlan,
+        texSource,
+        preview: rawText,
+        next: versionId ? '版本已生成。career_resume_compile 出 PDF，或到面板「简历工作室」改 LaTeX。' : '已出方案但未存版本。',
+      }
+    },
+  }))
+
+  // ── 个人资料库（学历/成绩/证书/专利）──────────────────────────────────────
+  const docsDir = path.join(config.dataDir, 'documents')
+  const saveDocFile = (fileName, base64) => {
+    fs.mkdirSync(docsDir, { recursive: true })
+    const safe = String(fileName ?? 'doc').replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 120) || 'doc'
+    const target = path.join(docsDir, `${Date.now()}-${safe}`)
+    fs.writeFileSync(target, Buffer.from(String(base64 ?? ''), 'base64'))
+    return target
+  }
+
+  add(makeTool({
+    name: 'career_doc_ingest',
+    description: '把学历证明、成绩单、四六级/托福成绩、专利证书、获奖证明等一并存入「个人资料库」。可给目录/多个路径/面板上传的 base64。系统按文件名与正文自动判断类别并抽取分数（托福/雅思/四六级/GPA），**保存前一律标为未确认**，等你核对。',
+    params: {
+      dir: S('目录绝对路径，递归找 pdf/docx/图片/md/txt（最多 40 个）'),
+      paths: SA('一个或多个文件绝对路径'),
+      fileName: S('面板上传时的原始文件名'), dataBase64: S('面板上传时的 base64'),
+      category: S('手动指定类别：degree|transcript|certificate|language|award|patent|publication|portfolio|identity|other'),
+      save: B('是否直接入库（默认 false，先返回候选让你确认）'),
+      verified: B('是否直接标为已确认，默认 false'),
+    },
+    async handler(args) {
+      const files = []
+      for (const item of arr(args.paths)) files.push(String(item))
+      if (args.dir) files.push(...scanResumeFiles(String(args.dir), 40))
+      if (args.dataBase64) files.push(saveDocFile(args.fileName, args.dataBase64))
+      if (!files.length) throw new Error('需要 dir / paths / dataBase64 之一')
+
+      const results = []
+      for (const filePath of files.slice(0, 40)) {
+        const fileName = path.basename(filePath)
+        const ext = path.extname(filePath).toLowerCase()
+        if (/\.(png|jpe?g|webp)$/i.test(ext)) {
+          // 图片型证明（扫描件）：不做 OCR，只登记并提示补信息
+          const proposal = proposeDocument({ fileName, text: '', filePath, mime: ext.slice(1) })
+          const saved = args.save === true
+            ? repos.profile.addDocument({ ...proposal, filePath, fileName, mime: ext.slice(1), verified: args.verified === true, notes: '扫描件/图片：未做 OCR，字段需手工补' })
+            : null
+          results.push({ fileName, kind: 'image', proposal, savedId: saved?.id ?? null, note: '图片未做 OCR' })
+          continue
+        }
+        const extracted = await extractResumeText(filePath, { pythonPath: config.pythonPath, timeoutMs: config.httpTimeoutMs })
+        if (!extracted.ok) {
+          results.push({ fileName, error: extracted.error })
+          continue
+        }
+        const proposal = proposeDocument({ fileName, text: extracted.text, filePath, mime: extracted.format })
+        if (args.category) proposal.category = String(args.category)
+        let saved = null
+        if (args.save === true) {
+          saved = repos.profile.addDocument({
+            ...proposal, rawText: extracted.text, filePath, fileName,
+            mime: extracted.format, verified: args.verified === true,
+          })
+        }
+        results.push({ fileName, chars: (extracted.text ?? '').length, proposal, savedId: saved?.id ?? null })
+      }
+      if (args.save === true) panel.publish({ kind: 'resume', resumeId: null })
+      return {
+        ok: true,
+        save: args.save === true,
+        results,
+        note: '类别与分数是自动判断的，可能不准；保存后请用 career_doc_update 核对标题/颁发机构/时间/证书编号，并把 verified 置 true。',
+        totals: { files: files.length, saved: results.filter((r) => r.savedId).length },
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_doc_list',
+    description: '列出个人资料库（学历/成绩/语言/专利/获奖…），可按类别与关键词过滤，附库统计。',
+    params: {
+      category: SA('类别过滤'),
+      query: S('关键词（标题/机构/分数/编号/正文）'),
+      verified: B('只看已确认 / 只看未确认'),
+    },
+    handler: (args) => ({
+      ok: true,
+      ...repos.profile.documentStats(),
+      categories: DOC_LABEL,
+      documents: repos.profile.listDocuments({ category: args.category, query: args.query, verified: args.verified }),
+    }),
+  }))
+
+  add(makeTool({
+    name: 'career_doc_update',
+    description: '修改一条个人资料（标题/机构/取得时间/证书编号/分数/类别/标签/备注），或标记已确认、或删除。',
+    params: {
+      id: S('资料 id'), delete: B('设为 true 表示删除'),
+      category: S('类别'), title: S('标题'), issuer: S('颁发机构'),
+      issuedAt: S('取得时间 YYYY-MM'), expiresAt: S('有效期'),
+      credentialId: S('证书编号/专利号'), score: S('分数原文'), scoreValue: N('分数数值'), scoreUnit: S('分/级/GPA'),
+      tags: SA('标签'), verified: B('是否已确认属实'), notes: S('备注'),
+    },
+    required: ['id'],
+    handler: (args) => {
+      if (args.delete === true) return { ok: true, deleted: repos.profile.deleteDocument(String(args.id)) }
+      return { ok: true, document: repos.profile.updateDocument(String(args.id), args) }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_doc_for_job',
+    description: '按某个岗位从个人资料库里「按需提取」该展示的资质：给每条资料算相关性并说明理由，输出可直接放进简历的「证书与语言」行。不做真伪判断。',
+    params: {
+      jobId: S('目标岗位 id'),
+      categories: SA('只在某些类别里挑'),
+      max: N('最多几条，默认 8'),
+      jd: S('也可以直接给 JD 文本（没有岗位 id 时）'),
+    },
+    handler: (args) => {
+      let job = null
+      if (args.jobId) {
+        job = repos.jobs.getJob(String(args.jobId))
+        if (!job) throw new Error('目标岗位不存在')
+      } else if (args.jd) {
+        job = { title: '', description: String(args.jd), requirements: '', skills: [] }
+      } else {
+        throw new Error('需要 jobId 或 jd')
+      }
+      const documents = repos.profile.listDocuments({})
+      const plan = planDocumentSelection({ documents, job, max: Number(args.max ?? 8), categories: arr(args.categories) })
+      return {
+        ok: true,
+        job: args.jobId ? { id: job.id, title: job.title, company: job.company_name } : null,
+        ...plan,
+        groups: renderDocumentLines(documents.filter((d) => plan.selected.some((s) => s.id === d.id))),
+        next: '把 groups 的 lines 放进简历「证书与语言」小节；用 career_resume_build 的 includeDocs 会自动带上。',
+      }
+    },
+  }))
+
+  // ── company / industry / research ──────────────────────────────────────────
+  add(makeTool({
+    name: 'career_company_upsert',
+    description: '建立/更新公司档案（官网、招聘入口、城市、标签、业务数据）。招聘入口填了才能做官方页监控。',
+    params: {
+      name: S('公司名（必填）'), id: S('已有公司 id（可选）'),
+      aliases: SA('别名，如「字节」「ByteDance」'),
+      website: S('官网'), careersUrl: S('官方招聘/校招页面 URL'), internUrl: S('实习招聘页 URL'),
+      cities: SA('办公城市'), size: S('规模'), tags: SA('标签'),
+      notes: S('备注'), data: { type: 'object', description: '结构化研究数据（业务线、商业模式、近期动态等）' },
+      interest: S('watch|target|exclude'),
+    },
+    required: ['name'],
+    handler: (args) => {
+      const company = repos.jobs.upsertCompany(args)
+      if (args.interest) repos.jobs.setWatch(company.id, args.interest, args.notes)
+      return { ok: true, company }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_company_get',
+    description: '公司档案 + 在库岗位 + 关注状态 + 研究简报列表 + 论坛观点统计。研究一家公司值不值得去时先读它。',
+    params: { id: S('公司 id'), name: S('或公司名') },
+    handler: (args) => {
+      const company = args.id ? repos.jobs.getCompany(String(args.id)) : repos.jobs.getCompany(repos.jobs.resolveCompany(String(args.name ?? ''), false)?.id)
+      if (!company) return { ok: false, error: '公司档案不存在，可先用 career_company_upsert 建立' }
+      return { ok: true, company }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_industry_upsert',
+    description: '建立/更新行业档案（定义、产业链、格局、驱动因素、风险、情景展望等，放在 data 对象里）。',
+    params: { name: S('行业名（必填）'), summary: S('行业摘要 Markdown'), data: { type: 'object', description: '结构化字段' }, parentId: S('父级行业 id') },
+    required: ['name'],
+    handler: (args) => ({ ok: true, industry: repos.intel.upsertIndustry(args) }),
+  }))
+
+  add(makeTool({
+    name: 'career_industry_list',
+    description: '列出行业档案（含公司数量）。',
+    params: {},
+    handler: () => ({ ok: true, industries: repos.intel.listIndustries() }),
+  }))
+
+  add(makeTool({
+    name: 'career_research_save',
+    description: '保存行业/公司研究简报（Markdown 正文 + 来源列表 + 数据时点）。再次保存同一 id 会 version+1，形成更新历史。',
+    params: {
+      id: S('已有报告 id（更新时传）'), kind: S('industry|company|bar|interview|summary'),
+      title: S('标题（必填）'), body: S('Markdown 正文（必填）'),
+      industryId: S('关联行业 id'), companyId: S('关联公司 id'),
+      sources: SA('来源链接/名称列表'), dataAsOf: S('数据时点 YYYY-MM-DD'),
+    },
+    required: ['title', 'body'],
+    handler: (args) => ({ ok: true, report: repos.intel.saveReport({ ...args, dataAsOf: args.dataAsOf ?? nowIso().slice(0, 10) }) }),
+  }))
+
+  add(makeTool({
+    name: 'career_evidence_add',
+    description: '登记一条证据（来源类型/链接/时间/核验状态/摘录/可信度 A-E）。用于给重要结论留溯源。',
+    params: {
+      subjectType: S('company|job|industry|claim'), subjectId: S('对应实体 id'),
+      sourceType: S('official_careers|filing|news|forum|search|manual'),
+      sourceUrl: S('链接'), publishedAt: S('发布时间'), claimType: S('宣称类型，如 job_opening'),
+      excerpt: S('简短摘录（不要存整页）'), confidenceLevel: S('A|B|C|D|U'), verificationStatus: S('verified|unverified|stale|conflicting'),
+    },
+    required: ['subjectType'],
+    handler: (args) => ({ ok: true, evidence: repos.intel.addEvidence(args) }),
+  }))
+
+  // ── social / bar / interview ───────────────────────────────────────────────
+  add(makeTool({
+    name: 'career_forum_import',
+    description: '导入一条论坛/面经内容（用户粘贴或合法导出）。自动去重，并抽取 claims（招聘 bar/面试/体验）与面试经历。accessMode 记录获取方式，禁止伪造正文。',
+    params: {
+      platform: S('xiaohongshu|nowcoder|zhihu|maimai|v2ex|1point3acres|github|other（必填）'),
+      content: S('正文或核心摘录（必填）'),
+      url: S('原链接'), title: S('标题'), author: S('公开昵称（不要收集个人信息）'),
+      publishedAt: S('发布时间 YYYY-MM-DD'),
+      company: S('关联公司名'), jobTitle: S('关联岗位名'),
+      accessMode: S('manual_import|user_export|public_page|search_snippet'),
+      claims: {
+        type: 'array', items: { type: 'object' },
+        description: '结构化观点 [{category:bar|interview|experience|salary|process, claim, stance, evidenceLevel, observedYear, department, sampleSize}]',
+      },
+      interview: {
+        type: 'object',
+        description: '面试经历 {stage, year, roleTitle, topics:[], questions:[], outcome, timeline}',
+      },
+    },
+    required: ['platform', 'content'],
+    handler: (args) => {
+      const post = repos.intel.addForumPost(args)
+      if (post.duplicate) return { ok: true, duplicate: true, postId: post.id, note: '这条内容已入库（按内容哈希去重），不重复计入证据。' }
+      const claims = Array.isArray(args.claims) ? args.claims : []
+      const created = claims.map((c) => repos.intel.addClaim({
+        postId: post.id, category: c.category, claim: c.claim, stance: c.stance,
+        evidenceLevel: c.evidenceLevel ?? 'C', observedYear: c.observedYear, department: c.department,
+        sampleSize: c.sampleSize, firstHand: args.accessMode === 'manual_import' || args.accessMode === undefined,
+        companyId: post.company_id, jobId: post.job_id,
+      }))
+      let interview = null
+      if (args.interview) {
+        interview = repos.intel.addInterview({
+          ...args.interview, postId: post.id, url: args.url,
+          companyId: post.company_id, jobId: post.job_id, evidenceLevel: 'C',
+        })
+      }
+      return {
+        ok: true, postId: post.id, claims: created.length, interview,
+        evidenceRule: '单条自述 = C 级；只有独立来源相互印证才能升到 B；不能当企业整体事实，也不能外推为录用概率。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_bar_analyze',
+    description: '招聘 Bar 分析：严格分层输出 hard（官方硬性）/preferred（官方加分）/observed（公开经验规律）/unverified（传闻），并附论坛信号与免责声明。',
+    params: { companyId: S('公司 id'), company: S('公司名'), jobId: S('岗位 id（可选）') },
+    handler: (args) => {
+      const bar = repos.intel.barFor(args)
+      return {
+        ok: true,
+        ...bar,
+        interviewExperiences: repos.intel.listInterviews({ companyId: bar.companyId, limit: 20 }),
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_social_queries',
+    description: '为无法自动抓取的平台（小红书/牛客/知乎/脉脉等）生成搜索关键词与公开搜索链接，供用户自己浏览后粘贴回来。',
+    params: { company: S('公司名'), role: S('岗位'), year: N('年份') },
+    handler: (args) => ({ ok: true, ...suggestSocialQueries(args) }),
+  }))
+
+  add(makeTool({
+    name: 'career_interview_prep',
+    description: '生成面试准备包：公司/岗位背景、核心能力、公开流程、面经主题汇总、高频题、简历追问、业务思考题、必须区分的「真实面经 vs AI 生成练习」。',
+    params: { jobId: S('岗位 id（可选）'), companyId: S('公司 id（可选）'), company: S('公司名'), role: S('岗位名') },
+    handler: (args) => {
+      const job = args.jobId ? repos.jobs.getJob(String(args.jobId)) : null
+      const companyId = args.companyId ?? job?.company_id ?? (args.company ? repos.jobs.resolveCompany(String(args.company), false)?.id : null)
+      const interviews = repos.intel.listInterviews({ companyId, jobId: job?.id, limit: 50 })
+      const bar = repos.intel.barFor({ companyId, jobId: job?.id })
+      const profile = repos.profile.get()
+      const realTopics = [...new Set(interviews.flatMap((i) => i.topics))]
+      const realQuestions = [...new Set(interviews.flatMap((i) => i.questions))]
+      return {
+        ok: true,
+        target: {
+          job: job ? { id: job.id, title: job.title, company: job.company_name, department: job.department } : null,
+          companyId,
+          role: job?.title ?? args.role ?? null,
+        },
+        companyContext: '用 career_company_get / career_research_save 填充业务与部门背景，不要凭空写。',
+        coreCompetencies: job?.skills ?? [],
+        realInterviewProcess: interviews.map((i) => ({ year: i.year, stage: i.stage, outcome: i.outcome, source: i.source_url })),
+        realTopics,
+        realQuestions,
+        hardRequirements: bar.hard,
+        observedPatterns: bar.observed,
+        resumeFollowUps: profile.skills.slice(0, 8).map((s) => `就「${s.name}」准备一个 STAR：背景→你的动作→量化结果（只用真实数据）`),
+        behaviorQuestions: ['为什么选这个岗位/这个部门', '讲一次你从 0 推动一件事的经历', '讲一次你和人意见冲突怎么解决'],
+        practicePlan: '用真实经历准备 STAR 草稿；不会的问题明确说不会并给出学习路径。',
+        provenance: {
+          real: 'realTopics/realQuestions 来自已导入的面经原文（C 级证据，样本有限）',
+          generated: 'behaviorQuestions / practicePlan 是 AI 生成的练习建议，不是真实面经',
+        },
+      }
+    },
+  }))
+
+  // ── matching ───────────────────────────────────────────────────────────────
+  add(makeTool({
+    name: 'career_match_rank',
+    description: '按当前画像给全部在库岗位重算匹配分并分组（高优先级/值得尝试/需要补强/硬条件不符/信息不足）。分数表示与你的偏好匹配度，不是录用概率。',
+    params: { limit: N('每组返回条数，默认 10') },
+    handler: (args) => {
+      const profile = repos.profile.getWithResume()
+      profile.__hash = repos.profile.hash()
+      const ranked = repos.jobs.rankAll(profile)
+      const limit = Math.min(Number(args.limit ?? 10), 30)
+      const groups = {}
+      for (const band of Object.keys(MATCH_BANDS)) groups[band] = []
+      for (const { job, analysis } of ranked) {
+        if (groups[analysis.band].length >= limit) continue
+        groups[analysis.band].push({
+          id: job.id, company: job.company_name, title: job.title, location: job.location,
+          status: job.status, deadline: job.deadline, score: analysis.score,
+          topReasons: analysis.reasons.matched.slice(0, 3),
+          blockers: analysis.hardBlocks,
+          missing: analysis.reasons.missing.slice(0, 3),
+        })
+      }
+      return {
+        ok: true,
+        weights: ranked[0]?.analysis?.weights ?? null,
+        bands: Object.fromEntries(Object.entries(groups).map(([k, v]) => [k, { label: MATCH_BANDS[k], items: v }])),
+        rankedTotal: ranked.length,
+        disclaimer: '分数 = 与个人偏好的匹配度（硬条件过滤 + 维度加权），不代表录用概率，也不预测竞争者数量。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_match_job',
+    description: '解释单个岗位的匹配结果：各维度得分、已满足/未满足/需核实项、建议突出的经历，并说明是否值得优先申请。',
+    params: { id: S('岗位 id'), weights: { type: 'object', description: '临时覆盖权重（可选）' } },
+    required: ['id'],
+    handler: (args) => {
+      const job = repos.jobs.getJob(String(args.id))
+      if (!job) throw new Error('岗位不存在')
+      const profile = repos.profile.getWithResume()
+      const analysis = analyzeMatch(profile, job, args.weights)
+      return {
+        ok: true,
+        job: { id: job.id, company: job.company_name, title: job.title, status: job.status },
+        ...analysis,
+        verdict: analysis.band === 'hard_mismatch'
+          ? '先解决硬条件不符（见 hardBlocks），否则不建议投'
+          : analysis.band === 'insufficient_info'
+            ? 'JD 信息不足，先补齐岗位描述再评估'
+            : '可以投，按 reasons.highlight 调整简历重点',
+      }
+    },
+  }))
+
+  // ── applications ───────────────────────────────────────────────────────────
+  add(makeTool({
+    name: 'career_application_create',
+    description: '创建投递记录（状态默认 saved）。不会替你投递，只记录。',
+    params: {
+      jobId: S('岗位 id（推荐，会自动带公司/岗位名）'), companyName: S('公司名'), jobTitle: S('岗位名'),
+      status: S(APPLICATION_STATUSES.join('|')), channel: S('投递渠道'), url: S('岗位链接'),
+      resumeVersionId: S('使用的简历版本'), nextAction: S('下一步动作'), nextActionAt: S('下一步日期 YYYY-MM-DD'), notes: S('备注'),
+    },
+    handler: (args) => ({ ok: true, application: repos.applications.create(args) }),
+  }))
+
+  add(makeTool({
+    name: 'career_application_update',
+    description: '更新投递状态/下一步/备注。状态变化会写入时间线事件（不覆盖历史）。',
+    params: {
+      id: S('投递记录 id（必填）'), status: S(APPLICATION_STATUSES.join('|')),
+      nextAction: S('下一步动作'), nextActionAt: S('下一步日期'), notes: S('备注'),
+      resumeVersionId: S('简历版本'), result: S('结果'), retro: S('复盘'), note: S('本次变更说明'), archived: B('归档'),
+    },
+    required: ['id'],
+    handler: (args) => ({ ok: true, application: repos.applications.update(String(args.id), args) }),
+  }))
+
+  add(makeTool({
+    name: 'career_applications_list',
+    description: '已投递清单：按状态/公司/招聘类型/关键词筛选，返回工作地点、投递地址、截止日期、下一步，并附逾期与长期无更新的跟进提示。',
+    params: {
+      status: SA('状态列表，如 ["applied","interview_1"]'),
+      company: S('公司名过滤'),
+      query: S('关键词（公司/岗位/备注/渠道）'),
+      recruitType: SA('招聘类型过滤：autumn_campus/spring_campus/summer/daily'),
+      sort: S('updated | applied | deadline'),
+      limit: N('条数，默认 200'),
+    },
+    handler: (args) => {
+      const rows = repos.applications.list({
+        status: args.status,
+        company: args.company,
+        query: args.query,
+        recruitType: args.recruitType,
+        sort: args.sort,
+        limit: args.limit ?? 200,
+      })
+      return {
+        ok: true,
+        count: rows.length,
+        applications: rows,
+        followUps: repos.applications.followUps(),
+        stats: repos.applications.stats(),
+        statusLabels: APPLICATION_LABEL,
+        recruitLabels: RECRUIT_LABEL,
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_applications_export',
+    description: '把已投递清单导出为 CSV（UTF-8 BOM，Excel 可直接打开），返回文件路径。用于备份或自己做表格跟踪。',
+    params: {
+      status: SA('只导出这些状态'),
+      company: S('公司名过滤'),
+      query: S('关键词过滤'),
+    },
+    handler: (args) => {
+      const rows = repos.applications.list({
+        status: args.status, company: args.company, query: args.query, limit: 5000, includeArchived: true,
+      })
+      const csv = repos.applications.toCsv(rows)
+      const file = exporter.writeCsv('applications', csv)
+      return { ok: true, file, rows: rows.length, bytes: csv.length }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_application_board',
+    description: '看板视图：按投递阶段分列，可直接给面板渲染。',
+    params: {},
+    handler: () => ({ ok: true, ...repos.applications.board() }),
+  }))
+
+  // ── monitoring ─────────────────────────────────────────────────────────────
+  add(makeTool({
+    name: 'career_monitor_create',
+    description: '创建监控规则。kind=careers_page（官方招聘页变化）/job_deadline（临近截止）/keyword_search（合规搜索发现）/social_watch（论坛线索入口）。',
+    params: {
+      kind: S('careers_page|job_deadline|keyword_search|social_watch'),
+      name: S('规则名'), spec: { type: 'object', description: 'careers_page: {url,company,autoImport}；job_deadline: {withinDays}；keyword_search: {queries,maxResults}；social_watch: {company,role}' },
+      cadence: S('daily|weekly|manual'), priority: S('high|normal|low'), enabled: B('是否启用'),
+    },
+    required: ['kind'],
+    handler: (args) => ({ ok: true, rule: repos.monitor.createRule(args) }),
+  }))
+
+  add(makeTool({
+    name: 'career_monitor_run',
+    description: '立即执行监控（串行、有节流）。返回每条规则的运行结果、耗时与错误；同时把超过时限未核验的岗位标为 STALE。',
+    params: { ruleId: S('只跑某条规则（可选）'), kinds: SA('按类型过滤') },
+    async handler(args) {
+      if (args.ruleId) {
+        const result = await monitor.runRule(String(args.ruleId))
+        return { ok: true, result }
+      }
+      const result = await monitor.runAll({ kinds: args.kinds })
+      return { ok: true, ...result }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_notifications',
+    description: '读取提醒（未读优先）。每条含变化内容、为什么相关、来源、核验时间与建议动作。',
+    params: { unreadOnly: B('只看未读'), limit: N('条数'), markRead: B('读取后标记已读') },
+    handler: (args) => {
+      const rows = repos.monitor.listNotifications({ unreadOnly: args.unreadOnly === true, limit: args.limit ?? 30 })
+      if (args.markRead === true) for (const r of rows) repos.monitor.markNotification(r.id, { read: true })
+      return { ok: true, count: rows.length, notifications: rows }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_digest',
+    description: '今日摘要：临近截止、新入库岗位、在招高匹配岗位、待办与统计。每日/每周汇报用它。',
+    params: {},
+    handler: () => ({ ok: true, digest: monitor.buildDigest() }),
+  }))
+
+  // ── 校招作战计划 ───────────────────────────────────────────────────────────
+  const gatherPlanInputs = () => {
+    const profile = repos.profile.get()
+    const completeness = repos.profile.completeness()
+    const bands = new Map(repos.db.all('SELECT job_id, band FROM match_result').map((r) => [r.job_id, r.band]))
+    const jobs = repos.jobs.listJobs({ limit: 500 }, profile).map((j) => ({ ...j, band: bands.get(j.id) ?? null }))
+    const applications = repos.applications.list({ limit: 500 })
+    const followUps = repos.applications.followUps()
+    const events = repos.intel.listEvents({ limit: 100 })
+    return { profile, completeness, jobs, applications, followUps, events }
+  }
+
+  add(makeTool({
+    name: 'career_plan',
+    description: '春招/秋招时间线 + 个性化行动清单：按你的毕业年份推算当前处在提前批/正式批/补录/春招哪个阶段、还剩多少天，并结合画像完成度、岗位池、在投数量、临近截止与逾期跟进给出按优先级排序的动作。数字取自本机数据，画像一变结论就变。',
+    params: { date: S('可选：以哪天为基准推算，YYYY-MM-DD，默认今天') },
+    handler: (args) => {
+      const inputs = gatherPlanInputs()
+      const plan = buildPlan({ ...inputs, now: str(args.date, 10) ?? today() })
+      return {
+        ok: true,
+        ...plan,
+        rules: plan.timeline ? seasonRuleSet(inputs.profile.grad_year) : null,
+        note: '窗口是行业常规节奏（经验值）；公司官方节点请用 career_event_add 登记后会自动排进动作清单。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_event_add',
+    description: '登记一个校招时间线节点（提前批开启、网申截止、笔试、面试、发 offer、入职）。source=official 表示官方公告，user 表示你自己填的，estimate 是估计——三者会在计划里区分显示。',
+    params: {
+      title: S('节点标题，如「字节跳动 2027 秋招网申截止」'),
+      startsAt: S('开始日期 YYYY-MM-DD（必填）'),
+      endsAt: S('结束日期 YYYY-MM-DD'),
+      season: S('autumn_campus | spring_campus | summer | daily'),
+      stage: S('apply_open | apply_close | written_test | interview | offer | onboard'),
+      company: S('公司名'), companyId: S('公司 id'),
+      source: S('official | user | estimate，默认 user'),
+      sourceUrl: S('公告链接'), evidenceLevel: S('A|B|C|D|U'), note: S('备注'),
+    },
+    required: ['title', 'startsAt'],
+    handler: (args) => ({ ok: true, event: repos.intel.addEvent(args) }),
+  }))
+
+  add(makeTool({
+    name: 'career_unit_upsert',
+    description: '建立/更新业务部门档案：这个部门负责什么业务、是核心/增长/支撑/收缩、有多少人、有哪些增长信号与风险。用于判断「这个岗位在不在核心业务上」。',
+    params: {
+      name: S('部门名称（必填）'),
+      company: S('公司名'), companyId: S('公司 id'),
+      business: S('这个部门负责的业务方向'),
+      strategicRole: S('core | growth | support | declining'),
+      headcountNote: S('规模/招人情况（有公开依据才填）'),
+      growthSignals: { type: 'array', items: { type: 'object' }, description: '[{claim, source, asOf, level}]' },
+      risks: { type: 'array', items: { type: 'object' }, description: '[{claim, source, asOf, level}]' },
+      dataAsOf: S('数据时点 YYYY-MM-DD'),
+    },
+    required: ['name'],
+    handler: (args) => ({ ok: true, unit: repos.intel.upsertUnit(args) }),
+  }))
+
+  add(makeTool({
+    name: 'career_outlook_add',
+    description: '登记一条市场/行业/公司/部门前景信号（一条断言 + 一条来源 + 证据等级 + 时限）。用于「结合市场情况、未来发展前景」做分析——必须带来源与日期，没有依据的不要写成结论。',
+    params: {
+      claim: S('一句话断言，必须可核对（必填）'),
+      scope: S('industry | company | unit'),
+      topic: S('需求 | 政策 | 技术 | 竞争 | 资本 | 人才'),
+      direction: S('positive | neutral | negative'),
+      horizon: S('0-6m | 6-18m | 18m+'),
+      industryId: S('关联行业 id'), companyId: S('关联公司 id'), unitId: S('关联部门 id'),
+      evidenceLevel: S('A 官方一手 | B 多源印证 | C 单一可溯源 | D 未证实 | U 信息不足'),
+      source: S('来源名称，如「公司财报」「工信部统计」'),
+      sourceUrl: S('来源链接'), asOf: S('数据时点 YYYY-MM-DD'),
+    },
+    required: ['claim'],
+    handler: (args) => ({ ok: true, signal: repos.intel.addSignal(args) }),
+  }))
+
+  add(makeTool({
+    name: 'career_plan_brief',
+    description: '生成一份综合分析简报（Markdown 并入库）：春招秋招时间线与当前阶段、你的画像与求职意愿、岗位池优先级与投递地址、招聘门槛分层、市场与行业前景、业务部门与成长、未知与待核实清单、未来 4 周动作。缺数据的部分会明确列在「未知」，不会编。',
+    params: {
+      save: B('是否存入研究简报库，默认 true'),
+      industryId: S('可选：聚焦某个行业的前景信号'),
+      companyId: S('可选：聚焦某家公司的部门与前景'),
+    },
+    handler: (args) => {
+      const inputs = gatherPlanInputs()
+      const now = today()
+      const plan = buildPlan({ ...inputs, now })
+      const signals = repos.intel.listSignals({
+        industryId: args.industryId, companyId: args.companyId, limit: 300,
+      })
+      const units = repos.intel.listUnits({ companyId: args.companyId })
+      const bar = repos.intel.barFor({ companyId: args.companyId })
+      const brief = buildBrief({
+        profile: inputs.profile,
+        completeness: inputs.completeness,
+        plan,
+        jobs: inputs.jobs,
+        applications: inputs.applications,
+        signals,
+        units,
+        bar,
+        now,
+      })
+      let reportId = null
+      if (args.save !== false) {
+        const report = repos.intel.saveReport({
+          kind: 'summary',
+          title: `求职作战计划 ${now}`,
+          body: brief.markdown,
+          sources: [...new Set(signals.map((s) => s.source).filter(Boolean))].slice(0, 20),
+          dataAsOf: now,
+          companyId: args.companyId ?? null,
+        })
+        reportId = report.id
+        panel.publish({ kind: 'reports', id: reportId })
+      }
+      return {
+        ok: true,
+        reportId,
+        markdown: brief.markdown,
+        missing: brief.missing,
+        stats: brief.stats,
+        evidenceRule: 'A/B 级才可作为结论依据；C 级仅供参考；D/U 必须标注不确定。时间为行业常规节奏（经验值）。',
+      }
+    },
+  }))
+
+  // ── feedback & panel ───────────────────────────────────────────────────────
+  add(makeTool({
+    name: 'career_feedback',
+    description: '对岗位/数据源/匹配结果反馈（interested/not_interested/wrong/stale/applied/disqualified/research），用于调整排序与改进数据质量。',
+    params: { subjectType: S('job|source|match|company'), subjectId: S('对象 id'), verdict: S('interested|not_interested|wrong|stale|applied|disqualified|research'), note: S('说明') },
+    required: ['subjectType', 'subjectId', 'verdict'],
+    handler: (args) => ({ ok: true, feedback: repos.monitor.addFeedback(args), summary: repos.monitor.feedbackSummary() }),
+  }))
+
+  add(makeTool({
+    name: 'career_panel',
+    description: '让用户在 CareerOS 面板里看到指定页面（并可选聚焦某个岗位/公司）。对话里给出结论后调用它，用户才知道去哪看。',
+    params: { tab: S('overview|plan|resume|industry|radar|company|social|tracker|interview|settings'), code: S('聚焦的岗位/公司 id'), note: S('一句话说明为什么看这里') },
+    required: ['tab'],
+    handler: (args) => {
+      const payload = { tab: String(args.tab), code: args.code ? String(args.code) : null, note: str(args.note, 200), at: nowIso() }
+      panel.publish({ kind: 'navigate', ...payload })
+      return { ok: true, navigated: payload, note: '面板已切换；如果用户没打开面板，用一句话告诉他点侧边栏的「求职面板」。' }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_export',
+    description: '导出数据为 JSON（可指定范围），返回文件路径。用于备份或迁移。',
+    params: { scope: S('all|jobs|applications|profile|research'), format: S('json（默认）') },
+    handler: (args) => ({ ok: true, ...deps.exporter.exportData(String(args.scope ?? 'all')) }),
+  }))
+
+  logger.info('career tools registered', { count: registered.length })
+  return registered
+}
