@@ -3,8 +3,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { APPLICATION_LABEL, APPLICATION_STATUSES, INTERNSHIP_LABEL, JOB_STATUSES, MATCH_BANDS, RECRUIT_LABEL, RECRUIT_TYPES, STATUS_LABEL, analyzeMatch, extractSkills } from './domain.js'
-import { crawlListing, postingToJob } from './crawl.js'
-import { ATS_SPECS, detectAts, fetchAtsPostings } from './ats.js'
+import { crawlListing, postingToJob, walkJsonForPostings } from './crawl.js'
+import { ATS_SPECS, detectAts, fetchAtsPostings, normalizeAtsPayload } from './ats.js'
+import { assertReplayable, describeJsonShape, parseCurl, replayRequest } from './curl.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
 import { compileTex, detectEngines, renderResumeTex, renderResumeText } from './latex.js'
@@ -551,6 +552,167 @@ export function registerCareerTools(ctx, deps) {
         next: args.dryRun === true
           ? '把 preview 给用户确认后再用 dryRun=false 入库。'
           : '入库后用 career_match_rank 重算排序；投递地址见每条 applyUrl。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_jobs_from_curl',
+    description: '从你自己浏览器里的请求取岗位：把 DevTools「Copy as cURL」粘进来（或直接粘接口返回的 JSON），系统重放一次并解析成岗位入库。这是绕过 SPA 私有接口最可靠的办法——不破解签名、不绕过登录，只重放你被授权的那一次请求。响应里没有岗位时会告诉你 JSON 结构，方便换一个请求再试。',
+    params: {
+      curl: S('DevTools 里 Copy as cURL 得到的整条命令（bash 或 cmd 均可）'),
+      json: S('或者直接粘接口返回的 JSON 文本（不做网络请求）'),
+      url: S('或者手填：请求地址'),
+      method: S('GET/POST，默认按是否有 body 推断'),
+      headers: { type: 'object', description: '手填时的请求头（含 Cookie 才带登录态）' },
+      body: S('手填时的请求体（POST 查询接口常用 JSON）'),
+      company: S('公司名（缺省从响应或你给的地址推断）'),
+      recruitType: S('autumn_campus|spring_campus|summer|daily|other'),
+      official: B('是否官方来源，默认 true'),
+      dryRun: B('只预览不写库，默认 false'),
+      limit: N('最多导入多少条，默认 200'),
+    },
+    async handler(args) {
+      const limit = Math.min(Number(args.limit ?? 200), 1000)
+      let payload = null
+      let sourceUrl = null
+      let via = null
+      let replayInfo = null
+
+      if (args.json) {
+        try {
+          payload = JSON.parse(String(args.json))
+        } catch (err) {
+          return { ok: false, error: `粘贴的 JSON 解析失败：${String(err?.message ?? err)}`, next: '确认复制的是响应体（Response 标签页里的原始 JSON），不是整个 HTML 页面。' }
+        }
+        via = 'pasted-json'
+        sourceUrl = str(args.url, 1000) ?? null
+      } else {
+        let request = null
+        if (args.curl) {
+          const parsed = parseCurl(String(args.curl))
+          if (!parsed.ok) {
+            return {
+              ok: false,
+              stage: 'parse',
+              problems: parsed.problems,
+              next: '在 Chrome/Edge 的 Network 面板里右键目标请求 → Copy → Copy as cURL (bash)，整条粘进来。',
+            }
+          }
+          request = { url: parsed.url, method: parsed.method, headers: parsed.headers, body: parsed.body }
+          replayInfo = { warnings: parsed.warnings }
+        } else if (args.url) {
+          request = {
+            url: String(args.url),
+            method: String(args.method ?? (args.body ? 'POST' : 'GET')).toUpperCase(),
+            headers: args.headers && typeof args.headers === 'object' ? args.headers : {},
+            body: args.body ? String(args.body) : null,
+          }
+        } else {
+          throw new Error('需要 curl / json / url 三者之一')
+        }
+
+        const guard = assertReplayable(request)
+        if (!guard.ok) return { ok: false, stage: 'guard', problems: guard.problems }
+
+        const result = await replayRequest(request, { timeoutMs: config.httpTimeoutMs })
+        if (!result.ok && result.json === null) {
+          return {
+            ok: false,
+            stage: 'replay',
+            status: result.status,
+            error: result.error ?? `HTTP ${result.status}`,
+            contentType: result.contentType,
+            textPreview: result.textPreview,
+            next: result.status === 401 || result.status === 403
+              ? '接口拒绝了这次请求：多半是缺登录态或签名。请确认在浏览器里已登录，并重新 Copy as cURL（把 Cookie 一起带上）。'
+              : '这个地址返回的不是 JSON。请在 Network 里找 Type 为 xhr/fetch、返回岗位列表的那个请求。',
+          }
+        }
+        payload = result.json
+        sourceUrl = result.url ?? request.url
+        via = args.curl ? 'curl-replay' : 'direct-request'
+        replayInfo = { status: result.status, contentType: result.contentType, bytes: result.bytes, headersRedacted: result.headersRedacted, warnings: replayInfo?.warnings ?? [] }
+        if (payload === null) {
+          return {
+            ok: false,
+            stage: 'not-json',
+            status: result.status,
+            contentType: result.contentType,
+            textPreview: result.textPreview,
+            next: '这次响应不是 JSON。换一个请求：Network 面板里筛 Fetch/XHR，点开看 Preview 是 JSON 数组/对象的那个。',
+          }
+        }
+      }
+
+      // 先按已知 ATS 结构归一，再退回通用「岗位数组」识别。
+      const atsInfo = detectAts(sourceUrl ?? '')
+      let postings = []
+      let strategy = 'generic'
+      if (atsInfo?.ats) {
+        postings = normalizeAtsPayload(atsInfo.ats, payload) ?? []
+        if (postings.length) strategy = `ats:${atsInfo.ats}`
+      }
+      // URL 认不出是哪家 ATS 时（用户粘的是响应体、或地址被改写），逐个归一器试一遍。
+      if (!postings.length && payload) {
+        for (const candidate of Object.keys(ATS_SPECS)) {
+          if (candidate === atsInfo?.ats) continue
+          const attempt = normalizeAtsPayload(candidate, payload) ?? []
+          if (attempt.length) {
+            postings = attempt
+            strategy = `ats-guess:${candidate}`
+            break
+          }
+        }
+      }
+      if (!postings.length) {
+        postings = walkJsonForPostings(payload, sourceUrl ?? '')
+        strategy = postings.length ? 'json-walk' : 'none'
+      }
+
+      if (!postings.length) {
+        return {
+          ok: false,
+          stage: 'no-postings',
+          strategy: 'none',
+          responseShape: describeJsonShape(payload),
+          topLevelKeys: payload && typeof payload === 'object' && !Array.isArray(payload) ? Object.keys(payload).slice(0, 20) : null,
+          next: '这个响应里没识别出岗位列表——很可能抓到了配置/字典接口。判断方法：看 Preview 里有没有一个数组，里面每项都带「职位名称/岗位名」和「城市/地点」。有的话把那条请求的 cURL 给我。',
+        }
+      }
+
+      const company = str(args.company, 200) ?? null
+      const recruitType = str(args.recruitType, 40) ?? null
+      const normalized = postings.slice(0, limit).map((posting) => postingToJob(posting, { company, pageUrl: sourceUrl }))
+      const withCompany = normalized.filter((job) => job.title)
+      const preview = withCompany.slice(0, 60).map((job) => ({
+        title: job.title, company: job.company, location: job.location,
+        recruitType: job.recruitType, applyUrl: job.applyUrl, deadline: job.deadline,
+      }))
+
+      if (args.dryRun === true) {
+        return { ok: true, via, strategy, sourceUrl, found: postings.length, parsed: withCompany.length, replay: replayInfo, preview, next: '确认无误后去掉 dryRun 再跑一次即可入库。' }
+      }
+
+      const imported = repos.jobs.importPostings(withCompany, {
+        company,
+        pageUrl: sourceUrl,
+        official: args.official !== false,
+        recruitType,
+        sourceName: args.official === false ? '用户重放的接口响应（非官方）' : '用户重放的接口响应（官方站点）',
+      })
+      panel.publish({ kind: 'jobs' })
+      return {
+        ok: true,
+        via, strategy, sourceUrl,
+        found: postings.length,
+        parsed: withCompany.length,
+        created: imported.created.length,
+        merged: imported.merged.length,
+        failed: imported.failed.slice(0, 10),
+        replay: replayInfo,
+        sample: preview.slice(0, 10),
+        note: '这批岗位的来源记为用户重放的接口响应，状态为 UNVERIFIED（不是官网页面直采），需要时可再用 career_job_verify 升级。',
       }
     },
   }))

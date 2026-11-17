@@ -67,6 +67,23 @@ D:\career_os\            ← 这个包本身就是 bundle
 >
 > 反向验证：`career_jobs_crawl` 抓 Lever 演示看板，返回 **10 条真实岗位**（标题/地点/投递地址齐全）。
 
+### SPA 站点的解法：重放你自己的那次请求
+
+大厂校招站（字节/腾讯/阿里…）的数据在私有接口里，通常带签名或会话 token。硬爬要破解签名——不合规、且对方一改就废。
+
+但**你在浏览器里打开那个页面时，这条请求本来就是合法的**。所以 `career_jobs_from_curl` 的做法是：
+
+1. 你在 F12 → Network 里右键目标请求 → **Copy as cURL**；
+2. 整条粘进来（或直接粘返回的 JSON）；
+3. 系统解析这条命令、**原样重放一次**、把响应识别成岗位入库。
+
+不破解签名、不绕过登录、不批量撞接口——只重放你被授权的那一次。
+
+安全边界都写在代码里：只允许 http/https，拒绝 `file://`、`localhost`、内网 IP；只允许 GET/POST；Cookie/Authorization 在输出里一律脱敏；单次重放，不翻页不并发。
+
+> 实测：把 `curl 'https://api.lever.co/v0/postings/leverdemo?mode=json'` 粘进去 → 自动识别为 `ats:lever` → **10 条岗位**（标题/地点/投递地址）。
+> 如果粘错了接口（抓到配置/字典），它会回显这个响应的**字段结构**，让你一眼看出该换哪个请求。
+
 ## 投递管理：要证据链，不要状态标签
 
 投递记录不只是「投了哪家」，而是**可复盘的凭据**：
@@ -114,6 +131,6 @@ node scripts\setup-runtime.mjs       # 装 PDF 解析依赖到项目内 runtime/
 
 ## 现状
 
-schema **v9** / ftsMode `trigram` / **67 工具** / 9 个测试套件 133 个用例全绿 / 面板已进入 Web boot graph。
+schema **v9** / ftsMode `trigram` / **68 工具** / 10 个测试套件 149 个用例全绿 / 面板已进入 Web boot graph。
 `data/` 与 `runtime/` 不入库（含真实简历与联系方式）；新机器克隆后跑一次 `scripts/setup-runtime.mjs` 即可。
 详见 [docs/acceptance-report.md](docs/acceptance-report.md) 与 [docs/environment.md](docs/environment.md)。

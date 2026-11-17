@@ -20,11 +20,14 @@ import {
 import { htmlToText, inferStatusFromText, politeGet, robotsAllows } from './sources.js'
 import { sha1ish, str } from './util.js'
 
-const TITLE_KEYS = ['title', 'name', 'jobName', 'job_name', 'positionName', 'position_name', 'postName', 'jobTitle', 'job_title', 'positionTitle', 'titleName', 'nameCn']
-const LOCATION_KEYS = ['city', 'location', 'workPlace', 'workplace', 'workCity', 'cityName', 'jobCity', 'cityList', 'address', 'locationName', 'base']
-const URL_KEYS = ['url', 'link', 'jobUrl', 'job_url', 'detailUrl', 'positionUrl', 'href', 'jobHref', 'applyUrl', 'apply_url']
-const CODE_KEYS = ['id', 'jobId', 'job_id', 'positionId', 'position_id', 'code', 'postId', 'jobCode']
-const DEPT_KEYS = ['department', 'dept', 'departmentName', 'team', 'bu', 'businessUnit', 'category']
+const TITLE_KEYS = ['title', 'name', 'jobName', 'job_name', 'positionName', 'position_name', 'postName', 'post_name', 'jobTitle', 'job_title', 'positionTitle', 'titleName', 'nameCn']
+// 国内校招接口普遍用蛇形/带后缀的字段名（city_name / work_city / location_name），
+// 少写一个就会把一整个接口判成「没有岗位」。
+const LOCATION_KEYS = ['city', 'location', 'workPlace', 'workplace', 'workCity', 'cityName', 'city_name', 'jobCity', 'job_city',
+  'cityList', 'address', 'locationName', 'location_name', 'work_place', 'work_city', 'base', 'region', 'city_text']
+const URL_KEYS = ['url', 'link', 'jobUrl', 'job_url', 'detailUrl', 'detail_url', 'positionUrl', 'position_url', 'href', 'jobHref', 'applyUrl', 'apply_url', 'job_detail_url']
+const CODE_KEYS = ['id', 'jobId', 'job_id', 'positionId', 'position_id', 'code', 'postId', 'post_id', 'jobCode', 'job_code']
+const DEPT_KEYS = ['department', 'dept', 'departmentName', 'department_name', 'team', 'bu', 'businessUnit', 'category', 'job_category', 'jobCategory']
 
 const NAV_WORDS = /^(首页|上一页|下一页|末页|更多|登陆|登录|注册|搜索|关于我们|联系我们|返回|详情|查看|立即申请|apply|home|next|prev|more)$/i
 
