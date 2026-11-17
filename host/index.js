@@ -7,6 +7,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CareerDb } from './db.js'
+import { runBackup } from './backup.js'
 import { Repos } from './repo/index.js'
 import { Monitor } from './monitor.js'
 import { PanelBus } from './panel.js'
@@ -107,6 +108,13 @@ export function apply(ctx, rawConfig = {}) {
 
   const db = new CareerDb(path.join(config.dataDir, 'career.db'), logger).open()
   logger.info('career database ready', db.info())
+
+  // 每天最多备份一次；失败不影响主流程。
+  try {
+    runBackup({ db, dataDir: config.dataDir, logger, retain: 7, intervalHours: 20 })
+  } catch (err) {
+    logger.warn('auto backup skipped', { error: String(err?.message ?? err) })
+  }
 
   const repos = new Repos(db, logger)
   const interrupted = repos.monitor.reconcileRuns()

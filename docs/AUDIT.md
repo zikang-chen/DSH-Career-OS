@@ -89,6 +89,12 @@ workflow 工具此前 `flat(envelope(x), x)` 把 `data` 和扁平字段各输出
 Dashboard「推荐机会」改为调用 `/match/rank` 真实匹配排序；岗位卡把
 「匹配度 / 证据等级 / 招聘状态 / 核验时间」四要素分开显示；投递漏斗增加「分渠道转化」。
 
+### P4-10 自动备份 ✅ 本日已修
+
+`host/backup.js`：插件启动时每天最多备份一次（间隔 20 小时），保留最近 7 份，
+失败不影响主流程。实测生成 `data/backups/career-20261117-074025.db`。
+新增 `tests/backup.test.mjs`（4 用例）。
+
 ### ~~P1-6 FTS 没被使用~~ —— **本条审计有误，特此更正**
 
 `repo/jobs.js` 的 `searchJobIds()` **已经走 FTS**：`db.ftsMode === 'trigram'` 且查询 ≥3 字时用
