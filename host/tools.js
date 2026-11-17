@@ -11,6 +11,7 @@ import { probePortals, resolvePortal } from './portal.js'
 import { fetchJdDetail, resolveJdProvider } from './jd.js'
 import { checkResumeQuality } from './quality.js'
 import { findJobsForMe, prepResumeForJob, summarizeApplications } from './workflows.js'
+import { envelope, flat } from './envelope.js'
 import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
@@ -1192,7 +1193,12 @@ export function registerCareerTools(ctx, deps) {
         internshipType: arr(args.type).length ? arr(args.type) : undefined,
         status: arr(args.status).length ? arr(args.status) : undefined,
       }, profile)
-      return { ok: true, ...findJobsForMe({ profile, jobs, limit: Number(args.limit ?? 10) }) }
+      const result = findJobsForMe({ profile, jobs, limit: Number(args.limit ?? 10) })
+      return flat(envelope(result, {
+        warnings: result.caveats ?? [],
+        nextActions: result.ok === false ? ['先填写画像'] : (result.count ? ['对选中的岗位跑 career_prep_resume'] : ['先去岗位雷达抓岗位']),
+        meta: { tool: 'career_find_jobs', considered: result.considered ?? 0 },
+      }), result)
     },
   }))
 
@@ -1203,7 +1209,12 @@ export function registerCareerTools(ctx, deps) {
     handler: () => {
       const applications = repos.applications.list({ limit: 1000, includeArchived: false })
       const events = repos.db.all('SELECT * FROM application_event')
-      return { ok: true, ...summarizeApplications({ applications, events }) }
+      const result = summarizeApplications({ applications, events })
+      return flat(envelope(result, {
+        warnings: result.funnel?.caveat ? [result.funnel.caveat] : [],
+        nextActions: result.needsAction?.length ? ['优先处理 needsAction 里的记录'] : [],
+        meta: { tool: 'career_my_progress', total: result.total },
+      }), result)
     },
   }))
 
@@ -1219,17 +1230,19 @@ export function registerCareerTools(ctx, deps) {
     handler: (args) => {
       const job = repos.jobs.getJob(String(args.jobId))
       if (!job) throw new Error('岗位不存在')
-      return {
-        ok: true,
-        ...prepResumeForJob({
-          profile: repos.profile.get(),
-          experiences: repos.profile.listExperiences(),
-          documents: repos.profile.listDocuments({}),
-          job,
-          maxEntries: Number(args.maxEntries ?? 6),
-          bulletsPerEntry: Number(args.bulletsPerEntry ?? 3),
-        }),
-      }
+      const result = prepResumeForJob({
+        profile: repos.profile.get(),
+        experiences: repos.profile.listExperiences(),
+        documents: repos.profile.listDocuments({}),
+        job,
+        maxEntries: Number(args.maxEntries ?? 6),
+        bulletsPerEntry: Number(args.bulletsPerEntry ?? 3),
+      })
+      return flat(envelope(result, {
+        warnings: [result.caveat, ...(result.quality?.issues ?? []).filter((i) => i.level === 'error').map((i) => i.message)].filter(Boolean),
+        nextActions: ['确认挑选结果后调用 career_resume_build 出稿'],
+        meta: { tool: 'career_prep_resume', jdLevel: result.jdCompleteness?.level ?? null },
+      }), result)
     },
   }))
 

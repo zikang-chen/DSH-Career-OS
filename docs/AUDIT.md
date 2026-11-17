@@ -143,7 +143,8 @@ Client 曾一次拉 120 条、`listJobs` 只有 `LIMIT` 没 `OFFSET`。**已加 
 | **P3（部分）** | 投递行内推进/快速记录已做；提醒去重、漏斗分时间范围未做 | `host/repo/applications.js`、`client` | 中 |
 | **P4（已完成核心项）** | 质量检查工具 + `/resume/quality` 路由 + 工作室「开始检查」按钮；三栏并排布局未做（改用分区卡片，窄面板更稳） | `host/quality.js`、`host/routes.js`、`client/index.cjs` | 中 |
 | **P5（已完成核心项）** | 3 个高层任务：`career_find_jobs` / `career_my_progress` / `career_prep_resume`（编排层，不复制逻辑） | `host/workflows.js`、`host/tools.js` | 中 |
-| **P5 剩余** | 工具响应统一适配层、Client 单文件拆分 | — | 高：拆分受 `__ModuleLoader__` 约束，需先验证多文件拼接 |
+| **P5 剩余** | Client 单文件拆分（受 `__ModuleLoader__` 约束，需先验证多文件拼接，避免白屏） | — | 高 |
+| **P5 已完成** | 统一响应外壳适配层 `host/envelope.js`：新 workflow 工具附加 `data/warnings/next_actions/meta`，老工具不动（逐步迁移，非一次性大改） | `host/envelope.js`、`host/tools.js` | 低 |
 
 **执行原则**：每阶段结束必须 183 个测试全绿 + 真实数据验证；不一次性拆掉现有结构。
 
