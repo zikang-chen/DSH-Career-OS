@@ -112,7 +112,11 @@ function useApi(path, deps) {
   return { ...state, reload }
 }
 
-// ─── primitives ──────────────────────────────────────────────────────────────
+// 构建标记：面板标题里显示，用于确认浏览器加载的是不是最新 bundle。
+// 改了 client 之后手动改这个字符串，方便一眼判断有没有缓存。
+const CLIENT_BUILD = 'v2026-11-17.3'
+
+
 function Chip({ tone, children }) {
   return h('span', { style: S.chip(tone) }, children)
 }
@@ -2282,7 +2286,7 @@ function Panel({ onClose }) {
             h('span', { style: { fontSize: 16 } }, '🎯'),
             h('div', null,
               h('div', { style: S.h1 }, 'CareerOS'),
-              h('div', { style: { ...S.muted, fontSize: 11 } }, '个人求职情报与实习管理系统 · 数据仅存本机'))),
+              h('div', { style: { ...S.muted, fontSize: 11 } }, `个人求职情报与实习管理系统 · 数据仅存本机 · ${CLIENT_BUILD}`))),
           h('div', { style: S.row },
             bootstrap.loading ? h(Chip, null, '同步中…') : null,
             h(Btn, { kind: 'ghost', onClick: bump }, '刷新'),
