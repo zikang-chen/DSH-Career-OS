@@ -108,6 +108,20 @@ function loadBundle() {
   return exported
 }
 
+test('Agent image task uses the inspected Session prompt contract', async () => {
+  const bundle=loadBundle()
+  const calls=[]
+  const ctx={slots:{inject(){}},remote:{session:{list:async()=>({items:[{sessionId:'chosen-session'}]})}},get:name=>name==='sessions'?{using:async(id,options,fn)=>{calls.push({id,options});return fn({ready:Promise.resolve(),binding:{session:{prompt:async(content,mode)=>{calls.push({content,mode});return {ok:true,value:{accepted:true}}}}}})}}:undefined}
+  bundle.apply(ctx)
+  const bridge=bundle.__internals.agentBridge()
+  assert.equal((await bridge.sessions())[0].sessionId,'chosen-session')
+  await bridge.send('chosen-session','读取指定图片，不代人工确认')
+  assert.equal(calls[0].id,'chosen-session')
+  assert.equal(calls[1].mode,'queue')
+  assert.deepEqual(calls[1].content,[{type:'text',text:'读取指定图片，不代人工确认'}])
+  assert.throws(()=>bundle.__internals.unwrapCareerRemote({ok:false,error:{message:'连接失败'}}),/连接失败/)
+})
+
 // ─── fixtures shaped exactly like the live /bootstrap response ───────────────
 const bootstrap = {
   ok: true,

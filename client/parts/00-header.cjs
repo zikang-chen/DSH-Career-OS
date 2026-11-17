@@ -10,3 +10,8 @@ const h = React.createElement
 const { useCallback, useEffect, useMemo, useRef, useState } = React
 
 const API = '/plugins/dsh-career/api'
+let careerAgentBridge = null
+function unwrapCareerRemote(result) {
+  if(result?.ok === false)throw new Error(result.error?.message || '会话操作失败')
+  return result?.ok === true ? result.value : result
+}

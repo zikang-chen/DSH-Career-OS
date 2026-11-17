@@ -44,6 +44,17 @@ const name = 'dsh-career-client'
 const inject = ['slots']
 
 function apply(ctx) {
+  careerAgentBridge = {
+    async sessions() { return unwrapCareerRemote(await ctx.remote.session.list({})).items || [] },
+    async send(sessionId,text) {
+      const controller=ctx.get ? ctx.get('sessions') : ctx.sessions
+      if(!controller)throw new Error('当前客户端未提供会话服务，请复制指令到对话')
+      return controller.using(sessionId,{source:'controllerOperation'},async ref=>{
+        await ref.ready
+        return unwrapCareerRemote(await ref.binding.session.prompt([{type:'text',text}], 'queue'))
+      })
+    },
+  }
   const safe = (label, fn) => {
     try {
       fn()
@@ -92,5 +103,7 @@ module.exports = {
     InterviewTab,
     SettingsTab,
     TABS,
+    unwrapCareerRemote,
+    agentBridge: () => careerAgentBridge,
   },
 }
