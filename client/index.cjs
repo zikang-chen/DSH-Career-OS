@@ -148,6 +148,48 @@ function ErrorBox({ error, onRetry }) {
     onRetry ? h('div', { style: { marginTop: 10 } }, h(Btn, { onClick: onRetry }, '重试')) : null)
 }
 
+/**
+ * 弹层：双击岗位 / 点开投递详情时用。
+ * 独立于面板的 portal，所以即使面板本身是弹层也能正常叠在上面。
+ */
+function Modal({ title, subtitle, onClose, children, width = 760 }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose?.() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+  return createPortal(
+    h('div', {
+      onClick: onClose,
+      style: {
+        position: 'fixed', inset: 0, zIndex: 2147483600, background: 'rgba(15,23,42,0.42)',
+        display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '5vh 16px', overflowY: 'auto',
+      },
+    },
+      h('div', {
+        onClick: (e) => e.stopPropagation(),
+        style: {
+          width: '100%', maxWidth: width, background: T.bg, borderRadius: 12, border: `1px solid ${T.border}`,
+          boxShadow: '0 24px 60px rgba(15,23,42,0.30)', overflow: 'hidden',
+        },
+      },
+        h('div', { style: { ...S.row, justifyContent: 'space-between', gap: 10, padding: '11px 14px', borderBottom: `1px solid ${T.border}`, background: T.surface, position: 'sticky', top: 0, zIndex: 1 } },
+          h('div', { style: { ...S.col, gap: 2, minWidth: 0 } },
+            h('div', { style: { ...S.body, fontWeight: 700, fontSize: 14, color: T.text } }, title),
+            subtitle ? h('div', { style: { ...S.muted, fontSize: 11 } }, subtitle) : null),
+          h(Btn, { kind: 'ghost', onClick: onClose }, '关闭')),
+        h('div', { style: { padding: 14 } }, children))),
+    document.body)
+}
+
+/** 详情里的一行「标签：值」，空值直接跳过（不显示成 空/undefined）。 */
+function KV({ label, children }) {
+  if (children === null || children === undefined || children === '') return null
+  return h('div', { style: { ...S.row, gap: 8, alignItems: 'baseline', marginBottom: 4 } },
+    h('span', { style: { ...S.muted, minWidth: 74, flex: '0 0 auto', fontSize: 11.5 } }, label),
+    h('span', { style: { ...S.body, minWidth: 0, wordBreak: 'break-word' } }, children))
+}
+
 function statusTone(status) {
   if (status === 'OPEN') return 'success'
   if (status === 'CLOSED') return 'error'
@@ -477,6 +519,7 @@ function RadarTab({ focusCode, onChanged }) {
   const [list, setList] = useState(null)
   const [selected, setSelected] = useState(null)
   const [detail, setDetail] = useState(null)
+  const [detailOpen, setDetailOpen] = useState(false)
   const [form, setForm] = useState({ company: '', title: '', jdText: '', url: '', official: false })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -501,6 +544,7 @@ function RadarTab({ focusCode, onChanged }) {
   const openDetail = useCallback((id) => {
     setSelected(id)
     setDetail(null)
+    setDetailOpen(true)
     apiGet(`/job?id=${encodeURIComponent(id)}`).then((res) => setDetail(res.job)).catch((err) => setError(err.message))
   }, [])
 
@@ -554,6 +598,8 @@ function RadarTab({ focusCode, onChanged }) {
       : h('div', { style: S.col }, list.jobs.map((job) => h('div', {
           key: job.id,
           onClick: () => openDetail(job.id),
+          onDoubleClick: () => openDetail(job.id),
+          title: '单击或双击查看完整岗位详情',
           style: {
             ...S.cardTight,
             cursor: 'pointer',
@@ -678,46 +724,117 @@ function RadarTab({ focusCode, onChanged }) {
       h('div', { style: { ...S.muted, margin: '6px 0' } }, list?.scope ?? '仅检索本地库；未访问第三方招聘平台。'),
       listBody),
 
-    detail
-      ? h('div', { style: S.card },
-        h('div', { style: { ...S.row, justifyContent: 'space-between' } },
-          h('div', { style: S.h2 }, `${detail.company_name} · ${detail.title}`),
-          h('div', { style: S.row },
-            h(Chip, { tone: statusTone(detail.status) }, detail.statusLabel ?? detail.status),
-            h(Btn, { kind: 'primary', onClick: track }, '加入投递'))),
-        h('div', { style: { ...S.muted, marginTop: 4 } },
-          `状态核验：${detail.status_verified_at ? relTime(detail.status_verified_at) : '从未核验'} · 来源 ${detail.sources?.length ?? 0} 条 · 状态变更 ${detail.history?.length ?? 0} 次`),
-        detail.hardBlocks?.length || detail.match?.reasons
-          ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
-            h('div', { style: S.h3 }, '匹配解释'),
-            h('div', { style: { ...S.muted } }, `匹配分 ${detail.match?.score ?? '未评分'}（与偏好的匹配度，不是录用概率）`),
-            (detail.match?.reasons?.matched ?? []).slice(0, 5).map((m, i) => h('div', { key: `m${i}`, style: { ...S.muted, color: T.success } }, `✓ ${m}`)),
-            (detail.match?.reasons?.missing ?? []).slice(0, 5).map((m, i) => h('div', { key: `x${i}`, style: { ...S.muted, color: T.warn } }, `! ${m}`)),
-            (detail.match?.reasons?.unknown ?? []).slice(0, 3).map((m, i) => h('div', { key: `u${i}`, style: S.muted }, `? ${m}`)))
-          : null,
-        detail.history?.length
-          ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
-            h('div', { style: S.h3 }, '状态历史'),
-            detail.history.map((row) => h('div', { key: row.id, style: { ...S.muted, marginBottom: 3 } },
-              `${fmtDate(row.verified_at)} · ${row.previous_status ?? '—'} → ${row.status}${row.evidence ? ` · ${row.evidence}` : ''}`)))
-          : null,
-        h('div', { style: { ...S.cardTight, marginTop: 10 } },
-          h('div', { style: S.h3 }, '标记招聘状态'),
-          h('div', { style: { ...S.row, flexWrap: 'wrap' } },
-            [['OPEN', true], ['CLOSED', true], ['UPCOMING', true], ['UNVERIFIED', false], ['STALE', false]].map(([s, off]) =>
-              h(Btn, { key: s, kind: 'ghost', onClick: () => verify(s, off) }, `${s}${off ? '（官方）' : ''}`))),
-          h('div', { style: { ...S.muted, marginTop: 6 } }, '只有官方证据能把状态改成 OPEN/CLOSED；非官方来源最多把 UNKNOWN 升为 UNVERIFIED。')),
-        detail.sources?.length
-          ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
-            h('div', { style: S.h3 }, '来源证据'),
-            detail.sources.map((s) => h('div', { key: s.id, style: { ...S.muted, marginBottom: 4, wordBreak: 'break-all' } },
-              h(Chip, { tone: s.confidence_level === 'A' ? 'success' : undefined }, s.confidence_level ?? 'C'),
-              ` ${s.source_type} · ${s.verification_status ?? 'unverified'} · ${fmtDate(s.retrieved_at)}`,
-              s.source_url ? h('a', { href: s.source_url, target: '_blank', rel: 'noreferrer', style: { color: T.accent, marginLeft: 6 } }, '打开') : null)))
-          : null,
-        detail.description ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
-          h('div', { style: S.h3 }, '岗位描述'),
-          h('div', { style: { ...S.body, whiteSpace: 'pre-wrap', maxHeight: 260, overflow: 'auto' } }, detail.description)) : null)
+    detailOpen
+      ? h(Modal, {
+        title: detail ? `${detail.company_name} · ${detail.title}` : '岗位详情',
+        subtitle: detail
+          ? `状态核验：${detail.status_verified_at ? relTime(detail.status_verified_at) : '从未核验'} · 来源 ${detail.sources?.length ?? 0} 条 · 状态变更 ${detail.history?.length ?? 0} 次`
+          : '加载中…',
+        onClose: () => { setDetailOpen(false); setSelected(null) },
+      },
+        !detail ? h(Loading) : h('div', { style: S.col },
+
+          // ① 顶部：状态 + 关键动作
+          h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 } },
+            h('div', { style: S.row },
+              h(Chip, { tone: statusTone(detail.status) }, detail.statusLabel ?? detail.status),
+              detail.deadlineInDays !== null && detail.deadlineInDays !== undefined
+                ? h(Chip, { tone: detail.deadlineInDays < 0 ? 'error' : detail.deadlineInDays <= 7 ? 'warn' : undefined },
+                  detail.deadlineInDays < 0 ? `已过截止 ${Math.abs(detail.deadlineInDays)} 天` : `距截止 ${detail.deadlineInDays} 天`)
+                : null),
+            h('div', { style: S.row },
+              detail.apply_url || detail.sources?.[0]?.source_url
+                ? h('a', {
+                  href: detail.apply_url || detail.sources[0].source_url, target: '_blank', rel: 'noreferrer',
+                  style: { ...S.btn('primary'), textDecoration: 'none', display: 'inline-flex', alignItems: 'center' },
+                }, '去投递页')
+                : null,
+              h(Btn, { kind: 'primary', onClick: track }, detail.application ? '已在投递中' : '加入投递'))),
+
+          // ② 基本信息（空值自动跳过，不显示成 —）
+          h('div', { style: { ...S.cardTight, marginTop: 10 } },
+            h('div', { style: S.h3 }, '基本信息'),
+            h('div', { style: S.grid(260) },
+              h(KV, { label: '公司' }, detail.company_name),
+              h(KV, { label: '岗位' }, detail.title),
+              h(KV, { label: '岗位编号' }, detail.job_code),
+              h(KV, { label: '招聘批次' }, (detail.recruit_type ? ({ autumn_campus: '秋招', spring_campus: '春招', summer: '暑期实习', daily: '日常实习', other: '其他' }[detail.recruit_type] ?? detail.recruit_type) : null)),
+              h(KV, { label: '工作地点' }, detail.location),
+              h(KV, { label: '部门/业务线' }, detail.department || detail.business_unit),
+              h(KV, { label: '实习类型' }, detail.internship_type),
+              h(KV, { label: '用工形式' }, detail.remote_type),
+              h(KV, { label: '截止日期' }, detail.deadline ? fmtDate(detail.deadline) : null),
+              h(KV, { label: '发布时间' }, detail.published_at ? fmtDate(detail.published_at) : null),
+              h(KV, { label: '学历要求' }, detail.grade_limit),
+              h(KV, { label: '专业要求' }, detail.major_limit),
+              h(KV, { label: '语言要求' }, detail.language_req),
+              h(KV, { label: '实习时长' }, detail.duration),
+              h(KV, { label: '每周出勤' }, detail.days_per_week ? `${detail.days_per_week} 天` : null),
+              h(KV, { label: '预计开始' }, detail.start_date ? fmtDate(detail.start_date) : null),
+              h(KV, { label: '薪酬' }, detail.salary_text),
+              h(KV, { label: '可转正' }, detail.conversion_possible === true ? '公开说明可转正' : (detail.conversion_possible === false ? '未说明' : null)))),
+          (detail.skills ?? []).length
+            ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+              h('div', { style: S.h3 }, '技能要求'),
+              h('div', { style: { ...S.row, flexWrap: 'wrap', marginTop: 4 } }, detail.skills.map((s) => h(Chip, { key: s }, s))))
+            : null,
+
+          // ③ 匹配解释
+          detail.match?.reasons || detail.match?.score !== undefined && detail.match?.score !== null
+            ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+              h('div', { style: S.h3 }, '匹配解释'),
+              h('div', { style: S.muted }, `匹配分 ${detail.match?.score ?? '未评分'}（与偏好的匹配度，不是录用概率）`),
+              (detail.match?.reasons?.matched ?? []).slice(0, 6).map((m, i) => h('div', { key: `m${i}`, style: { ...S.muted, color: T.success } }, `✓ ${m}`)),
+              (detail.match?.reasons?.missing ?? []).slice(0, 6).map((m, i) => h('div', { key: `x${i}`, style: { ...S.muted, color: T.warn } }, `! ${m}`)),
+              (detail.match?.reasons?.unknown ?? []).slice(0, 4).map((m, i) => h('div', { key: `u${i}`, style: S.muted }, `? ${m}`)))
+            : null,
+
+          // ④ JD 正文（没有就诚实说明，并指路）
+          detail.description || detail.requirements
+            ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+              h('div', { style: S.h3 }, '岗位描述'),
+              detail.description
+                ? h('div', { style: { ...S.body, whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto' } }, detail.description)
+                : h('div', { style: S.muted }, '没有存到描述正文。'),
+              detail.requirements && detail.requirements !== detail.description
+                ? h('div', { style: { marginTop: 8 } },
+                  h('div', { style: { ...S.muted, fontWeight: 600 } }, '任职要求'),
+                  h('div', { style: { ...S.body, whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto' } }, detail.requirements))
+                : null)
+            : h('div', { style: { ...S.cardTight, marginTop: 10, borderColor: T.warn } },
+              h('div', { style: S.h3 }, '岗位描述'),
+              h('div', { style: S.muted }, '这个岗位没有 JD 正文。原因：它的列表接口只返回标题、地点和批次，正文要点进详情页才有。'),
+              h('div', { style: { ...S.muted, marginTop: 4 } },
+                detail.apply_url ? '点右上角「去投递页」查看完整 JD。' : '建议到官网搜索该岗位编号查看完整 JD。')),
+
+          // ⑤ 来源与历史
+          detail.sources?.length
+            ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+              h('div', { style: S.h3 }, '来源证据'),
+              detail.sources.map((s) => h('div', { key: s.id, style: { ...S.muted, marginBottom: 4, wordBreak: 'break-all' } },
+                h(Chip, { tone: s.confidence_level === 'A' ? 'success' : undefined }, s.confidence_level ?? 'C'),
+                ` ${s.source_type} · ${s.verification_status ?? 'unverified'} · ${fmtDate(s.retrieved_at)}`,
+                s.source_url ? h('a', { href: s.source_url, target: '_blank', rel: 'noreferrer', style: { color: T.accent, marginLeft: 6 } }, '打开') : null)))
+            : null,
+          detail.history?.length
+            ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+              h('div', { style: S.h3 }, '状态历史'),
+              detail.history.map((row) => h('div', { key: row.id, style: { ...S.muted, marginBottom: 3 } },
+                `${fmtDate(row.verified_at)} · ${row.previous_status ?? '—'} → ${row.status}${row.evidence ? ` · ${row.evidence}` : ''}`)))
+            : null,
+          (detail.notes ?? []).length
+            ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+              h('div', { style: S.h3 }, '备注'),
+              detail.notes.map((n) => h('div', { key: n.id, style: { ...S.muted, marginBottom: 4 } }, `${fmtDate(n.created_at)} · ${n.body}`)))
+            : null,
+
+          // ⑥ 状态标记
+          h('div', { style: { ...S.cardTight, marginTop: 10 } },
+            h('div', { style: S.h3 }, '标记招聘状态'),
+            h('div', { style: { ...S.row, flexWrap: 'wrap' } },
+              [['OPEN', true], ['CLOSED', true], ['UPCOMING', true], ['UNVERIFIED', false], ['STALE', false]].map(([s, off]) =>
+                h(Btn, { key: s, kind: 'ghost', onClick: () => verify(s, off) }, `${s}${off ? '（官方）' : ''}`))),
+            h('div', { style: { ...S.muted, marginTop: 6 } }, '只有官方证据能把状态改成 OPEN/CLOSED；非官方来源最多把 UNKNOWN 升为 UNVERIFIED。'))))
       : null)
 }
 
@@ -963,6 +1080,31 @@ function TrackerTab({ bootstrap, onChanged }) {
 
   const changeStatus = (id, status) => apiPost('/application/update', { id, status }).then(() => { load(); onChanged?.() }).catch((err) => setError(err.message))
 
+  // 投递详情：冻结的 JD + 材料快照 + 状态时间线。点一行就开，不用再翻页面。
+  const [appDetail, setAppDetail] = useState(null)
+  const [appOpen, setAppOpen] = useState(false)
+  const [appLoading, setAppLoading] = useState(false)
+  const openApp = useCallback((id) => {
+    setAppOpen(true)
+    setAppLoading(true)
+    setAppDetail(null)
+    apiGet(`/application?id=${encodeURIComponent(id)}`)
+      .then((res) => setAppDetail(res.application))
+      .catch((err) => setError(err.message))
+      .finally(() => setAppLoading(false))
+  }, [])
+
+  // 校招/实习阶段顺序：用于「推进到下一阶段」这一个按钮。
+  const PIPE = ['saved', 'researching', 'resume_todo', 'ready', 'applied', 'assessment', 'written_test', 'interview_1', 'interview_2', 'final', 'hr', 'offer']
+  const nextStage = (status) => {
+    const index = PIPE.indexOf(status)
+    return index >= 0 && index < PIPE.length - 1 ? PIPE[index + 1] : null
+  }
+  const advance = (id, status) => {
+    const next = nextStage(status)
+    if (next) changeStatus(id, next)
+  }
+
   // 漏斗 + 网申信息卡：复盘看漏斗，投递时用信息卡。
   const [funnel, setFunnel] = useState(null)
   const [card, setCard] = useState(null)
@@ -1034,36 +1176,56 @@ function TrackerTab({ bootstrap, onChanged }) {
 
   const cellStyle = { padding: '6px 8px', borderBottom: `1px solid ${T.border}`, color: T.text, verticalAlign: 'top' }
   const cell = (content, extra) => h('td', { style: { ...cellStyle, ...(extra ?? {}) } }, content)
+  const STATUS_OPTS = ['saved', 'researching', 'resume_todo', 'ready', 'applied', 'assessment', 'written_test', 'interview_1', 'interview_2', 'final', 'hr', 'offer', 'rejected', 'closed', 'withdrawn']
+  const statusChipTone = (s) => s === 'offer' ? 'success' : (s === 'rejected' || s === 'closed' || s === 'withdrawn') ? 'error' : s === 'applied' ? 'accent' : (s === 'interview_1' || s === 'interview_2' || s === 'final' || s === 'hr') ? 'warn' : undefined
   const listTable = data
     ? h('div', { style: S.card },
       h('div', { style: { ...S.muted, marginBottom: 8 } },
-        '按截止日期排序。投递地址是入库时抓到的申请页，点「打开」直接去投；「复制」方便粘贴到浏览器或表格。'),
+        '点任意一行看「冻结的 JD + 材料快照 + 状态时间线」；状态下拉可直接改，不用来回切页。'),
       h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 12.5 } },
         h('thead', null, h('tr', null,
-          ['公司', '岗位', '类型', '工作地点', '投递地址', '状态', '投递日期', '截止', '下一步'].map((label) =>
-            h('th', { key: label, style: { textAlign: 'left', padding: '6px 8px', color: T.muted, borderBottom: `1px solid ${T.border}`, fontWeight: 600, whiteSpace: 'nowrap' } }, label)))),
-        h('tbody', null, data.applications.map((a) => h('tr', { key: a.id },
-          cell(a.company_name),
-          cell(a.job_title),
+          ['公司 / 岗位', '批次', '投递地址', '状态（可直接改）', '投递', '截止', '下一步', ''].map((label) =>
+            h('th', { key: label, style: { textAlign: 'left', padding: '7px 8px', color: T.muted, borderBottom: `1px solid ${T.border}`, fontWeight: 600, whiteSpace: 'nowrap' } }, label)))),
+        h('tbody', null, data.applications.map((a) => h('tr', {
+          key: a.id,
+          onClick: () => openApp(a.id),
+          title: '点击查看详情',
+          style: { cursor: 'pointer', background: a.nextActionOverdue ? 'rgba(217,119,6,0.06)' : 'transparent' },
+        },
+          cell(h('div', { style: { ...S.col, gap: 1 } },
+            h('span', { style: { ...S.body, fontWeight: 600 } }, a.company_name),
+            h('span', { style: { ...S.muted, fontSize: 11.5 } }, [a.job_title, a.location].filter(Boolean).join(' · ')))),
           cell((data.recruitLabels ?? {})[a.recruit_type] ?? a.recruit_type ?? '—', { color: T.muted, whiteSpace: 'nowrap' }),
-          cell(a.location ?? '—', { color: T.muted, whiteSpace: 'nowrap' }),
           cell(a.apply_url || a.url
             ? h('span', { style: { ...S.row, gap: 6 } },
-              h('a', { href: a.apply_url || a.url, target: '_blank', rel: 'noreferrer', style: { color: T.accent } }, '打开'),
+              h('a', {
+                href: a.apply_url || a.url, target: '_blank', rel: 'noreferrer',
+                onClick: (e) => e.stopPropagation(), style: { color: T.accent, whiteSpace: 'nowrap' },
+              }, '去投递'),
               h('button', {
-                type: 'button',
-                title: a.apply_url || a.url,
-                onClick: () => {
-                  try { navigator.clipboard.writeText(a.apply_url || a.url) } catch { /* clipboard may be blocked */ }
-                },
+                type: 'button', title: a.apply_url || a.url,
+                onClick: (e) => { e.stopPropagation(); try { navigator.clipboard.writeText(a.apply_url || a.url) } catch { /* blocked */ } },
                 style: { ...S.btn('ghost'), padding: '2px 6px', fontSize: 11 },
               }, '复制'))
-            : h('span', { style: { color: T.muted } }, '—'), { maxWidth: 120 }),
-          cell(h(Chip, { tone: a.status === 'offer' ? 'success' : a.status === 'rejected' ? 'error' : a.status === 'applied' ? 'accent' : undefined },
-            (data.labels ?? {})[a.status] ?? a.status), { whiteSpace: 'nowrap' }),
+            : h('span', { style: { color: T.muted } }, '—'), { maxWidth: 110 }),
+          cell(h('div', { style: { ...S.row, gap: 4 } },
+            h('select', {
+              style: { ...S.input, width: 108, fontSize: 11.5, padding: '3px 4px' },
+              value: a.status,
+              onClick: (e) => e.stopPropagation(),
+              onChange: (e) => { e.stopPropagation(); changeStatus(a.id, e.target.value) },
+            }, STATUS_OPTS.map((s) => h('option', { key: s, value: s }, (data.labels ?? {})[s] ?? s))),
+            nextStage(a.status)
+              ? h('button', {
+                type: 'button', title: `推进到「${(data.labels ?? {})[nextStage(a.status)] ?? nextStage(a.status)}」`,
+                onClick: (e) => { e.stopPropagation(); advance(a.id, a.status) },
+                style: { ...S.btn('ghost'), padding: '2px 6px', fontSize: 11, whiteSpace: 'nowrap' },
+              }, '推进 ›')
+              : null), { whiteSpace: 'nowrap' }),
           cell(fmtDate(a.applied_at), { color: T.muted, whiteSpace: 'nowrap' }),
           cell(fmtDate(a.deadline), { color: T.muted, whiteSpace: 'nowrap' }),
-          cell([a.next_action, fmtDate(a.next_action_at)].filter(Boolean).join(' @ ') || '—', { color: T.muted }))))))
+          cell([a.next_action, fmtDate(a.next_action_at)].filter(Boolean).join(' @ ') || '—', { color: a.nextActionOverdue ? T.warn : T.muted }),
+          cell(h('span', { style: { ...S.muted, fontSize: 11.5 } }, '详情 ›'), { whiteSpace: 'nowrap' }))))))
     : h(Loading)
 
   return h('div', { style: S.col },
@@ -1073,9 +1235,8 @@ function TrackerTab({ bootstrap, onChanged }) {
     h('div', { style: { ...S.row, justifyContent: 'space-between' } },
       h('div', { style: S.h1 }, '投递管理'),
       h('div', { style: S.row },
-        h(Btn, { kind: view === 'list' ? 'primary' : undefined, onClick: () => setView('list') }, '已投递清单'),
+        h(Btn, { kind: view === 'list' ? 'primary' : undefined, onClick: () => setView('list') }, '清单'),
         h(Btn, { kind: view === 'board' ? 'primary' : undefined, onClick: () => setView('board') }, '看板'),
-        h(Btn, { kind: view === 'table' ? 'primary' : undefined, onClick: () => setView('table') }, '表格'),
         h(Btn, { kind: 'ghost', onClick: exportCsv }, '导出 CSV'),
         h(Btn, { kind: 'ghost', onClick: load }, '刷新'))),
 
@@ -1116,27 +1277,110 @@ function TrackerTab({ bootstrap, onChanged }) {
               h('div', { style: { ...S.row, justifyContent: 'space-between', marginBottom: 6 } },
                 h('span', { style: { ...S.body, fontWeight: 600 } }, data.labels[status] ?? status),
                 h(Chip, null, String(items.length))),
-              h('div', { style: S.col }, items.map((a) => h('div', { key: a.id, style: S.cardTight },
+              h('div', { style: S.col }, items.map((a) => h('div', {
+                key: a.id, style: { ...S.cardTight, cursor: 'pointer' },
+                onClick: () => openApp(a.id), title: '点击查看详情',
+              },
                 h('div', { style: { ...S.body, fontWeight: 600 } }, a.company_name),
                 h('div', { style: S.muted }, a.job_title),
                 h('select', {
                   style: { ...S.input, marginTop: 6, fontSize: 11, padding: '3px 5px' },
                   value: a.status,
-                  onChange: (e) => changeStatus(a.id, e.target.value),
-                }, columns.map((s) => h('option', { key: s, value: s }, data.labels[s] ?? s))),
+                  onClick: (e) => e.stopPropagation(),
+                  onChange: (e) => { e.stopPropagation(); changeStatus(a.id, e.target.value) },
+                }, STATUS_OPTS.map((s) => h('option', { key: s, value: s }, data.labels[s] ?? s))),
                 a.next_action_at ? h('div', { style: { ...S.muted, fontSize: 11, marginTop: 4 } }, `下一步 ${fmtDate(a.next_action_at)}`) : null))))
           }))
-        : h('div', { style: S.card },
-          h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 12.5 } },
-            h('thead', null, h('tr', null, ['公司', '岗位', '状态', '渠道', '投递日期', '下一步'].map((c) => h('th', { key: c, style: { textAlign: 'left', padding: '6px 8px', color: T.muted, borderBottom: `1px solid ${T.border}`, fontWeight: 600 } }, c)))),
-            h('tbody', null, data.applications.map((a) => h('tr', { key: a.id },
-              h('td', { style: { padding: '6px 8px', borderBottom: `1px solid ${T.border}`, color: T.text } }, a.company_name),
-              h('td', { style: { padding: '6px 8px', borderBottom: `1px solid ${T.border}`, color: T.text } }, a.job_title),
-              h('td', { style: { padding: '6px 8px', borderBottom: `1px solid ${T.border}` } }, h(Chip, { tone: a.status === 'offer' ? 'success' : a.status === 'rejected' ? 'error' : undefined }, data.labels[a.status] ?? a.status)),
-              h('td', { style: { padding: '6px 8px', borderBottom: `1px solid ${T.border}`, color: T.muted } }, a.channel ?? '—'),
-              h('td', { style: { padding: '6px 8px', borderBottom: `1px solid ${T.border}`, color: T.muted } }, fmtDate(a.applied_at)),
-              h('td', { style: { padding: '6px 8px', borderBottom: `1px solid ${T.border}`, color: T.muted } }, [a.next_action, fmtDate(a.next_action_at)].filter(Boolean).join(' @ ') || '—'))))))
-  )
+        : listTable,
+
+    // 投递详情弹层：冻结的 JD + 材料快照 + 时间线
+    appOpen
+      ? h(Modal, {
+        title: appDetail ? `${appDetail.company_name} · ${appDetail.job_title}` : '投递详情',
+        subtitle: appDetail ? `状态：${(data?.labels ?? {})[appDetail.status] ?? appDetail.status} · 投递 ${fmtDate(appDetail.applied_at)} · 渠道 ${appDetail.channel ?? '未填'}` : '加载中…',
+        onClose: () => { setAppOpen(false); setAppDetail(null) },
+      },
+        appLoading ? h(Loading) : !appDetail ? h(Empty, { title: '没有取到记录' }) : h('div', { style: S.col },
+
+          h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 } },
+            h('div', { style: S.row },
+              h(Chip, { tone: statusChipTone(appDetail.status) }, (data?.labels ?? {})[appDetail.status] ?? appDetail.status),
+              appDetail.next_action_overdue || appDetail.nextActionOverdue ? h(Chip, { tone: 'warn' }, '下一步已逾期') : null),
+            h('div', { style: S.row },
+              h('select', {
+                style: { ...S.input, width: 120, fontSize: 12 },
+                value: appDetail.status,
+                onChange: (e) => apiPost('/application/update', { id: appDetail.id, status: e.target.value })
+                  .then(() => { load(); onChanged?.(); openApp(appDetail.id) })
+                  .catch((err) => setError(err.message)),
+              }, STATUS_OPTS.map((s) => h('option', { key: s, value: s }, (data?.labels ?? {})[s] ?? s))),
+              (appDetail.apply_url || appDetail.url)
+                ? h('a', { href: appDetail.apply_url || appDetail.url, target: '_blank', rel: 'noreferrer', style: { ...S.btn('primary'), textDecoration: 'none', display: 'inline-flex', alignItems: 'center' } }, '去投递页')
+                : null)),
+
+          h('div', { style: { ...S.cardTight, marginTop: 10 } },
+            h('div', { style: S.h3 }, '投递信息'),
+            h('div', { style: S.grid(260) },
+              h(KV, { label: '公司' }, appDetail.company_name),
+              h(KV, { label: '岗位' }, appDetail.job_title),
+              h(KV, { label: '工作地点' }, appDetail.location),
+              h(KV, { label: '招聘批次' }, (data?.recruitLabels ?? {})[appDetail.recruit_type] ?? appDetail.recruit_type),
+              h(KV, { label: '渠道' }, appDetail.channel),
+              h(KV, { label: '投递日期' }, appDetail.applied_at ? fmtDate(appDetail.applied_at) : null),
+              h(KV, { label: '截止日期' }, appDetail.deadline ? fmtDate(appDetail.deadline) : null),
+              h(KV, { label: '结果' }, appDetail.result),
+              h(KV, { label: '下一步' }, [appDetail.next_action, appDetail.next_action_at ? fmtDate(appDetail.next_action_at) : null].filter(Boolean).join(' @ ')),
+              h(KV, { label: '备注' }, appDetail.notes))),
+
+          // 提交材料快照
+          appDetail.submissionSnapshot
+            ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+              h('div', { style: S.h3 }, '当时提交了什么'),
+              h(KV, { label: '简历版本' }, appDetail.submissionSnapshot.resumeLabel ?? '未指定'),
+              h(KV, { label: '附带资料' }, (appDetail.submissionSnapshot.documents ?? []).length
+                ? appDetail.submissionSnapshot.documents.map((d) => d.title).join('；')
+                : (appDetail.submissionSnapshot.materialsSpecified ? '无' : '当时没有指定材料')),
+              h(KV, { label: '记录时间' }, appDetail.submissionSnapshot.capturedAt ? relTime(appDetail.submissionSnapshot.capturedAt) : null))
+            : null,
+
+          // 冻结的 JD
+          appDetail.submittedJd
+            ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+              h('div', { style: S.h3 }, '冻结的 JD（投递当时的要求）'),
+              h('div', { style: { ...S.muted, fontSize: 11, marginBottom: 4 } },
+                `来源：${appDetail.submittedJd.source === 'user' ? '你粘贴的原文' : '岗位库快照'} · 记录于 ${appDetail.submittedJd.capturedAt ? relTime(appDetail.submittedJd.capturedAt) : '—'}`),
+              appDetail.submittedJd.text
+                ? h('div', { style: { ...S.body, whiteSpace: 'pre-wrap', maxHeight: 320, overflow: 'auto' } }, appDetail.submittedJd.text)
+                : h('div', { style: S.col },
+                  appDetail.submittedJd.description ? h('div', { style: { ...S.body, whiteSpace: 'pre-wrap', maxHeight: 260, overflow: 'auto' } }, appDetail.submittedJd.description) : null,
+                  appDetail.submittedJd.requirements ? h('div', { style: { ...S.body, whiteSpace: 'pre-wrap', maxHeight: 260, overflow: 'auto', marginTop: 6 } }, appDetail.submittedJd.requirements) : null,
+                  !appDetail.submittedJd.description && !appDetail.submittedJd.requirements
+                    ? h('div', { style: S.muted }, '这条记录创建时岗位库里没有 JD 正文。')
+                    : null))
+            : h('div', { style: { ...S.cardTight, marginTop: 10, borderColor: T.warn } },
+              h('div', { style: S.h3 }, '冻结的 JD'),
+              h('div', { style: S.muted }, '这条投递没有留存 JD 快照（创建时未提供）。建议以后用 career_application_create 时带上 jd 参数，面试前就能回放当时的要求。')),
+
+          // 时间线
+          (appDetail.events ?? []).length
+            ? h('div', { style: { ...S.cardTight, marginTop: 10 } },
+              h('div', { style: S.h3 }, '状态时间线'),
+              appDetail.events.map((e) => h('div', { key: e.id, style: { ...S.muted, marginBottom: 4 } },
+                `${fmtDate(e.at)} · ${e.from_status ? `${(data?.labels ?? {})[e.from_status] ?? e.from_status} → ` : ''}${(data?.labels ?? {})[e.to_status] ?? e.to_status ?? e.type}${e.note ? ` · ${e.note}` : ''}`)))
+            : null,
+
+          // 快捷操作：下一步与结论
+          h('div', { style: { ...S.cardTight, marginTop: 10 } },
+            h('div', { style: S.h3 }, '快速记录'),
+            h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 6, marginTop: 6 } },
+              [['assessment', '进笔试'], ['interview_1', '约一面'], ['interview_2', '进二面'], ['final', '进终面'], ['offer', '拿 offer'], ['rejected', '被拒'], ['withdrawn', '我放弃']].map(([s, label]) =>
+                h(Btn, {
+                  key: s, kind: s === 'offer' ? 'primary' : 'ghost',
+                  onClick: () => apiPost('/application/update', { id: appDetail.id, status: s, note: `快捷记录：${label}` })
+                    .then(() => { load(); onChanged?.(); openApp(appDetail.id) })
+                    .catch((err) => setError(err.message)),
+                }, label))))))
+      : null)
 }
 
 // ─── Interview prep ──────────────────────────────────────────────────────────

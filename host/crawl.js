@@ -211,6 +211,8 @@ export function walkJsonForPostings(parsed, baseUrl) {
           location: str(location, 200),
           department: str(firstOf(node, DEPT_KEYS), 200),
           jobCode: str(code, 120),
+          // 详情接口常用的独立 id（腾讯 postId），与列表 jobCode 不是一回事
+          postId: str(firstOf(node, ['postId', 'post_id', 'post_id_str', 'postid']), 120),
           description: str(description, 20000),
           requirements: str(firstOf(node, ['requirement', 'requirements', 'jobRequirement']), 20000),
           recruitTypeText: firstOf(node, ['recruit_type', 'recruitType', 'recruitment_type', 'recruitmentType', 'projectName', 'positionSource']),
@@ -438,6 +440,7 @@ export function postingToJob(posting, { company, pageUrl, pageText } = {}) {
     company: posting.company ?? company,
     title: posting.title,
     jobCode: posting.jobCode ?? null,
+    postId: posting.postId ?? null,
     department: posting.department ?? null,
     location: posting.location ?? (pageText ? extractCity(pageText) : null),
     url: posting.url ?? pageUrl,

@@ -229,6 +229,7 @@ export function normalizeJob(input = {}) {
     title,
     titleKey: titleKey(title),
     jobCode: str(input.jobCode ?? input.job_id ?? input.code, 120),
+    postId: str(input.postId ?? input.post_id, 120),
     department: str(input.department ?? input.team, 200),
     businessUnit: str(input.businessUnit ?? input.business_unit ?? input.bu, 200),
     location,

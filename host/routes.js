@@ -5,7 +5,7 @@
 // prepared token. Nothing here can submit an application or send mail.
 import fs from 'node:fs'
 import path from 'node:path'
-import { APPLICATION_LABEL, JOB_STATUSES, MATCH_BANDS, RECRUIT_LABEL, STATUS_LABEL } from './domain.js'
+import { APPLICATION_LABEL, APPLICATION_STATUSES, JOB_STATUSES, MATCH_BANDS, RECRUIT_LABEL, STATUS_LABEL } from './domain.js'
 import { crawlListing, postingToJob } from './crawl.js'
 import { ATS_SPECS } from './ats.js'
 import { buildRetrievalGuide } from './guide.js'
@@ -423,6 +423,14 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
   route('POST', '/job/archive', async ({ body }) => {
     if (!body.id) throw new HttpError('缺少 id')
     return { ok: true, job: repos.jobs.setArchived(String(body.id), body.archived !== false) }
+  })
+
+  route('GET', '/application', ({ query }) => {
+    const id = query.get('id')
+    if (!id) throw new HttpError('缺少 id')
+    const application = repos.applications.get(String(id))
+    if (!application) throw new HttpError('投递记录不存在', 404)
+    return { ok: true, application, statusLabels: APPLICATION_STATUSES }
   })
 
   route('POST', '/application', async ({ body }) => {

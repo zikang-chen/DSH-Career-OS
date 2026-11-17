@@ -2,7 +2,7 @@
 // and is recorded in `schema_migrations`. Never edit an applied migration — append a
 // new one instead, so existing databases keep their history and user data.
 
-export const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 12
 
 /**
  * @type {Array<{version:number,name:string,sql:string}>}
@@ -695,6 +695,16 @@ CREATE INDEX idx_jd_company ON jd_snapshot(company_key, captured_at DESC);
     // 这里把每轮看到的岗位编号存下来，diff 才有正确基准。
     sql: `
 ALTER TABLE company_capture ADD COLUMN seen_codes TEXT;
+`,
+  },
+  {
+    version: 12,
+    name: 'job-post-id-and-jd-fetch',
+    // 有些站点（腾讯）列表接口只给标题/地点，正文要另调详情接口，而详情接口用的是
+    // 另一个 id（postId），不是列表里的岗位 id。把 postId 存下来，才能按需补 JD 正文。
+    sql: `
+ALTER TABLE job ADD COLUMN post_id TEXT;
+CREATE INDEX idx_job_post_id ON job(post_id);
 `,
   },
 ]

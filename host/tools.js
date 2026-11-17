@@ -8,6 +8,7 @@ import { ATS_SPECS, detectAts, fetchAtsPostings, normalizeAtsPayload } from './a
 import { assertReplayable, describeJsonShape, parseCurl, replayRequest } from './curl.js'
 import { browserProfileDir, capturePageJson, closeBrowser, findBrowserExecutable, openForLogin } from './browser.js'
 import { probePortals, resolvePortal } from './portal.js'
+import { fetchJdDetail, resolveJdProvider } from './jd.js'
 import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
@@ -759,6 +760,7 @@ export function registerCareerTools(ctx, deps) {
       timeoutMs: N('等待页面加载与请求的毫秒数，默认 25000'),
       scope: S('这次抓取的筛选范围描述，如「岗位类别=产品;城市=北京,上海;招聘类型=暑期实习」。范围一致的两次抓取才能判定「下架」'),
       useOpenTab: B('从你已经打开的同源标签页抓（会重载该页触发请求）。不知道岗位列表在哪条路由时用这个'),
+      fillJd: B('抓完列表后自动补 JD 正文（默认 true）。列表接口不给正文的站点（如腾讯）靠这一步才有描述'),
     },
     required: ['url'],
     handler: async (args) => {
@@ -890,6 +892,35 @@ export function registerCareerTools(ctx, deps) {
         })
       }
 
+      // 自动补 JD 正文：列表接口常常不返回正文（腾讯就是这样），
+      // 抓完列表立刻按 postId 逐条调详情接口补上，免得岗位库里只有标题。
+      let jdFill = null
+      if (args.fillJd !== false) {
+        const codes = batchRows.map((r) => r.jobCode).filter(Boolean)
+        const idMap = ckey ? repos.captures.jobIdByCode(companyName, codes) : new Map()
+        const targets = []
+        for (const code of codes) {
+          const jobId = idMap.get(String(code))
+          if (!jobId) continue
+          const job = repos.jobs.getJob(jobId)
+          if (job && !String(job.description ?? '').trim()) targets.push(job)
+        }
+        const filled = []
+        const failed = []
+        for (const job of targets.slice(0, 60)) {
+          const provider = resolveJdProvider({ applyUrl: job.apply_url, url: job.url })
+          if (!provider) { failed.push({ title: job.title, error: '这家公司没登记详情接口' }); continue }
+          const res = await fetchJdDetail({ provider, postId: job.post_id, jobCode: job.job_code, timeoutMs: config.httpTimeoutMs })
+          if (!res.ok) { failed.push({ title: job.title, error: res.error }); continue }
+          const w = repos.jobs.setJd(job.id, res)
+          if (w?.updated) {
+            repos.captures.saveJdSnapshots([{ jobId: job.id, companyKey: ckey, title: job.title, location: res.location ?? job.location, deadline: job.deadline, description: res.description ?? job.description, requirements: res.requirements ?? job.requirements }])
+            filled.push({ title: job.title, chars: (res.description ?? '').length })
+          }
+        }
+        jdFill = { attempted: targets.length, filled: filled.length, sample: filled.slice(0, 5), failed: failed.slice(0, 8) }
+      }
+
       return {
         ok: true,
         mode: 'browser',
@@ -901,6 +932,7 @@ export function registerCareerTools(ctx, deps) {
         merged: imported.merged.length,
         failed: imported.failed.slice(0, 10),
         sample: preview.slice(0, 10),
+        jdFill,
         freshness: {
           previousCaptureAt: previousCapture?.captured_at ?? null,
           previousScope: previousCapture?.scope ?? null,
@@ -1029,6 +1061,71 @@ export function registerCareerTools(ctx, deps) {
           ...captureFreshness(row.captured_at),
         })),
         note: rows.length ? undefined : '还没有任何抓取记录。',
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_job_jd_fetch',
+    description: '按需补全 JD 正文：有些站点（如腾讯校招）的列表接口只返回标题和地点，正文要另调详情接口。这个工具对「缺 JD 正文」的岗位逐个调详情接口并写回，同时存 JD 快照。认不出的站点会诚实说明不支持的接口。',
+    params: {
+      company: S('只补这家公司的岗位（可选）'),
+      ids: SA('只补这几个岗位 id（可选，优先于 company）'),
+      limit: N('最多补多少条，默认 50'),
+    },
+    handler: async (args) => {
+      const limit = Math.min(Number(args.limit ?? 50), 300)
+      let targets = []
+      if (arr(args.ids).length) {
+        targets = arr(args.ids).map((id) => repos.jobs.getJob(String(id))).filter(Boolean)
+      } else {
+        targets = repos.jobs.jobsMissingJd({ company: str(args.company, 200) ?? undefined, limit })
+      }
+      if (!targets.length) {
+        return { ok: true, total: 0, note: '没有缺 JD 正文的岗位。' }
+      }
+
+      const filled = []
+      const skipped = []
+      const failed = []
+      for (const job of targets.slice(0, limit)) {
+        const provider = resolveJdProvider({ applyUrl: job.apply_url, url: job.url })
+        if (!provider) {
+          skipped.push({ id: job.id, company: job.company_name, title: job.title, reason: '这家公司的详情接口没有登记' })
+          continue
+        }
+        const result = await fetchJdDetail({ provider, postId: job.post_id, jobCode: job.job_code, timeoutMs: config.httpTimeoutMs })
+        if (!result.ok) {
+          failed.push({ id: job.id, company: job.company_name, title: job.title, error: result.error })
+          continue
+        }
+        const written = repos.jobs.setJd(job.id, result)
+        if (written?.updated) {
+          repos.captures.saveJdSnapshots([{
+            jobId: job.id,
+            companyKey: companyKey(job.company_name ?? ''),
+            title: job.title,
+            location: result.location ?? job.location,
+            deadline: job.deadline,
+            description: result.description ?? job.description,
+            requirements: result.requirements ?? job.requirements,
+          }])
+          filled.push({ id: job.id, company: job.company_name, title: job.title, filled: written.filled, chars: (result.description ?? '').length })
+        } else {
+          skipped.push({ id: job.id, company: job.company_name, title: job.title, reason: '已有正文，未覆盖' })
+        }
+      }
+      panel.publish({ kind: 'jobs' })
+      return {
+        ok: true,
+        total: targets.length,
+        filled: filled.length,
+        skipped: skipped.length,
+        failed: failed.length,
+        detail: { filled, skipped: skipped.slice(0, 10), failed: failed.slice(0, 10) },
+        next: failed.length
+          ? '有失败的：多半是缺 postId（重新抓一次列表就会带上）或接口改版。'
+          : (filled.length ? 'JD 已写回岗位库，岗位雷达里双击就能看到正文。' : '没有需要补的。'),
       }
     },
   }))

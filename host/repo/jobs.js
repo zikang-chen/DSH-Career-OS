@@ -10,7 +10,7 @@ import {
 import { arr, bind, companyKey, daysBetween, normKey, nowIso, num, parseJson, sha1ish, str, toBool, uuid } from '../util.js'
 
 export const JOB_COLUMNS = [
-  'id', 'dedupe_key', 'company_id', 'company_name', 'title', 'title_key', 'job_code', 'department',
+  'id', 'dedupe_key', 'company_id', 'company_name', 'title', 'title_key', 'job_code', 'post_id', 'department',
   'business_unit', 'location', 'remote_type', 'internship_type', 'description', 'requirements', 'skills',
   'grade_limit', 'major_limit', 'language_req', 'duration', 'start_date', 'days_per_week', 'salary_text',
   'conversion_possible', 'published_at', 'deadline', 'recruit_type', 'apply_url', 'status', 'status_verified_at',
@@ -160,6 +160,7 @@ export class JobRepo {
         if (value !== null && value !== undefined && value !== '' && value !== existing[col]) updates[col] = value
       }
       assign('job_code', job.jobCode)
+      assign('post_id', job.postId)
       assign('department', job.department)
       assign('business_unit', job.businessUnit)
       assign('location', job.location)
@@ -204,6 +205,7 @@ export class JobRepo {
       title: job.title,
       title_key: job.titleKey,
       job_code: job.jobCode,
+      post_id: job.postId,
       department: job.department,
       business_unit: job.businessUnit,
       location: job.location,
@@ -395,8 +397,42 @@ export class JobRepo {
     }
   }
 
-  addNote(jobId, body, author = '我') {
-    const id = uuid()
+  /**
+   * 补写 JD 正文（来自详情接口）。只填空字段，不覆盖已有内容——
+   * 已有的可能来自更权威的来源，不该被列表接口的兜底数据冲掉。
+   */
+  setJd(jobId, patch = {}) {
+    const current = this.db.get('SELECT description, requirements, location, department FROM job WHERE id = ?', [jobId])
+    if (!current) return null
+    const fields = {}
+    const put = (col, value) => {
+      if (!value) return
+      const existing = current[col]
+      if (existing === null || existing === undefined || String(existing).trim() === '') fields[col] = String(value)
+    }
+    put('description', patch.description)
+    put('requirements', patch.requirements)
+    put('location', patch.location)
+    put('department', patch.department)
+    if (!Object.keys(fields).length) return { updated: false, job: this.getJob(jobId) }
+    fields.updated_at = nowIso()
+    this.db.run(`UPDATE job SET ${Object.keys(fields).map((k) => `${k} = ?`).join(', ')} WHERE id = ?`,
+      [...Object.values(fields), jobId])
+    return { updated: true, filled: Object.keys(fields).filter((k) => k !== 'updated_at'), job: this.getJob(jobId) }
+  }
+
+  /** 列出缺 JD 正文的岗位（用于批量补全）。 */
+  jobsMissingJd({ company, limit = 200 } = {}) {
+    const where = ["archived = 0", "(description IS NULL OR trim(description) = '')"]
+    const params = []
+    if (company) { where.push('company_name = ?'); params.push(company) }
+    return this.db.all(
+      `SELECT id, company_name, title, job_code, post_id, apply_url FROM job WHERE ${where.join(' AND ')} ORDER BY updated_at DESC LIMIT ?`,
+      [...params, Math.min(Number(limit ?? 200), 1000)],
+    )
+  }
+
+  addNote(jobId, body, author = '我') {    const id = uuid()
     this.db.run('INSERT INTO job_note (id, job_id, body, author, created_at) VALUES (?, ?, ?, ?, ?)',
       [id, jobId, str(body, 8000), str(author, 80), nowIso()])
     return this.db.get('SELECT * FROM job_note WHERE id = ?', [id])
