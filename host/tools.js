@@ -1300,6 +1300,7 @@ export function registerCareerTools(ctx, deps) {
       recruitType: S('只看某类：campus（校招）/ social（社招）/ intern（实习）'),
       fillJd: B('预览或入库时是否抓 JD 正文（默认 true，串行打开详情）'),
       fillJdLimit: N('最多为多少条抓 JD 正文，默认 3（0–20）'),
+      autoOcr: B('确认入库后自动本地识别小红书图片，每批最多5张，默认false；不自动人工确认'),
       fillBody: B('小红书是否进一步读取笔记正文，默认 true'),
       bodyLimit: N('最多补几篇小红书正文，默认 2（0–10）'),
     },

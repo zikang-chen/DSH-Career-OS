@@ -2,6 +2,7 @@
 import { capturePageJson, capturePageText } from './browser.js'
 import { fetchJdDetail, resolveJdProvider } from './jd.js'
 import {captureNowcoder} from './nowcoder.js'
+import {processKnowledgeOcr} from './ocr.js'
 import { classifyRecruitType, filterByRecruitType, getSiteProfile, normalizeRecruitType } from './sites.js'
 
 const sourceForSite = (site) => ({boss:'job_board','51job':'job_board',xhs:'social_platform',offershow:'offershow'})[site]
@@ -163,14 +164,21 @@ export async function captureSite(args = {}, {config,repos,panel,logger,captureJ
       }
       return finish({...base,addedEvents,duplicate,skipped:limited.length-plans.length,next:'有日期的转载校招计划已入时间线；薪资与计划不会混为一类。'},{inserted:addedEvents,duplicates:duplicate})
     }
-    let saved=0,duplicate=0
+    let saved=0,duplicate=0,ocrProcessed=0
+    const ocrFailures=[]
     for (const it of limited) {
       const content=[it.title,it.desc].filter(Boolean).join('\n\n')
       if (!content) continue
       const post=repos.intel.addForumPost({platform:'xiaohongshu',content,url:it.url,title:it.title,author:it.author,publishedAt:it.publishedAt,accessMode:'browser_session'})
-      repos.knowledge?.upsert({kind:'interview',title:it.title,company:args.company??null,role:args.role??null,platform:'xiaohongshu',url:it.url,publishedAt:it.publishedAt,body:it.desc??'',completeness:it.bodyStatus==='detail'?'full':'summary',evidenceLevel:'C',media:(it.media?.images??[]).map(image=>({...image,ocrStatus:'pending'})),sourceEntityType:'forum_post',sourceEntityId:post.id})
+      const knowledgeItem=repos.knowledge?.upsert({kind:'interview',title:it.title,company:args.company??null,role:args.role??null,platform:'xiaohongshu',url:it.url,publishedAt:it.publishedAt,body:it.desc??'',completeness:it.bodyStatus==='detail'?'full':'summary',evidenceLevel:'C',media:(it.media?.images??[]).map(image=>({...image,ocrStatus:'pending'})),sourceEntityType:'forum_post',sourceEntityId:post.id})
+      if(args.autoOcr===true && knowledgeItem) for(let imageIndex=0;imageIndex<knowledgeItem.media.length && ocrProcessed<5;imageIndex++){
+        if(knowledgeItem.media[imageIndex].ocrStatus==='reviewed')continue
+        const result=await processKnowledgeOcr({id:knowledgeItem.id,index:imageIndex+1},{repos,config})
+        ocrProcessed++
+        if(!result.ok)ocrFailures.push({title:it.title,index:imageIndex+1,error:result.image?.error})
+      }
       post.duplicate?duplicate++:saved++
     }
-    return finish({...base,saved,duplicate,next:'笔记已入论坛情报；列表摘要不等于完整面经正文。'},{inserted:saved,duplicates:duplicate})
+    return finish({...base,saved,duplicate,ocrProcessed,ocrFailures,next:'笔记已入论坛情报；列表摘要不等于完整面经正文。'},{inserted:saved,duplicates:duplicate})
   } catch (err) {return finish({ok:false,stage:'error',error:String(err.message)})}
 }

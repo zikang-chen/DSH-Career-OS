@@ -1014,7 +1014,7 @@ function KnowledgeLink({ url, children }) {
   return safe ? h('a', { href: safe, target: '_blank', rel: 'noopener noreferrer', style: { ...S.muted, color: T.accent, overflowWrap: 'anywhere' } }, children || safe) : null
 }
 function KnowledgeCapture({ onImported }) {
-  const [form, setForm] = useState({ site: 'xhs', keyword: '', recruitType: '', limit: 20 })
+  const [form, setForm] = useState({ site: 'xhs', keyword: '', recruitType: '', limit: 20, autoOcr: false })
   const [result, setResult] = useState(null)
   const [previewArgs, setPreviewArgs] = useState(null)
   const [busy, setBusy] = useState(false)
@@ -1026,7 +1026,7 @@ function KnowledgeCapture({ onImported }) {
     if (!form.keyword.trim()) return setError('请先填写采集关键词。')
     const limit = Number(form.limit)
     if (!Number.isInteger(limit) || limit < 1 || limit > 200) return setError('采集数量须为 1–200 的整数。')
-    const args = dryRun ? { site: form.site, keyword: form.keyword.trim(), limit, fillJd: true, ...(jobSite && form.recruitType ? { recruitType: form.recruitType } : {}) } : previewArgs
+    const args = dryRun ? { site: form.site, keyword: form.keyword.trim(), limit, fillJd: true, autoOcr: form.autoOcr, ...(jobSite && form.recruitType ? { recruitType: form.recruitType } : {}) } : previewArgs
     setBusy(true); setError(null); setResult(null)
     if (dryRun) setPreviewArgs(null)
     else setPreviewArgs(null)
@@ -1042,7 +1042,7 @@ function KnowledgeCapture({ onImported }) {
       else onImported?.()
     } catch (err) { setError(err.message) } finally { setBusy(false) }
   }
-  const failures = result ? [...(result.warnings || []), ...(result.jdFailures || []).map(x => `JD：${x.title || ''} ${x.error || ''}`), ...(result.bodyFailures || []).map(x => `正文：${x.title || ''} ${x.error || ''}`), ...(result.failed || []).map(knowledgeText), ...(result.gaps || []).map(knowledgeText)] : []
+  const failures = result ? [...(result.warnings || []), ...(result.jdFailures || []).map(x => `JD：${x.title || ''} ${x.error || ''}`), ...(result.bodyFailures || []).map(x => `正文：${x.title || ''} ${x.error || ''}`), ...(result.ocrFailures||[]).map(x=>`图片识别：${x.title||''} 第${x.index}张 ${x.error||''}`), ...(result.failed || []).map(knowledgeText), ...(result.gaps || []).map(knowledgeText)] : []
   return h('div', { style: S.col },
     h('div', { style: S.muted }, '先预览，再由你确认入库。仅采集当前返回范围；需在「设置 → 数据源」登录支持站点并人工完成验证。不会绕过访问控制。OfferShow 是校招计划线索，不是薪资或官方在招证明。'),
     h('div', { style: knowledgeGrid(160) },
@@ -1050,6 +1050,7 @@ function KnowledgeCapture({ onImported }) {
       h(Field, { label: '关键词' }, h('input', { style: S.input, value: form.keyword, onChange: set('keyword'), disabled: busy, placeholder: '公司 / 岗位 / 面经关键词' })),
       jobSite ? h(Field, { label: '招聘类型（仅岗位）' }, h('select', { style: S.input, value: form.recruitType, onChange: set('recruitType'), disabled: busy }, Object.entries({ '': '不限类型', campus: '校园招聘', social: '社会招聘', intern: '实习' }).map(([v, label]) => h('option', { key: v, value: v }, label)))) : null,
       h(Field, { label: '数量上限（1–200）' }, h('input', { type: 'number', min: 1, max: 200, style: S.input, value: form.limit, onChange: set('limit'), disabled: busy }))),
+    form.site === 'xhs' ? h('label',{style:{...S.muted,display:'flex',gap:8}},h('input',{type:'checkbox',checked:form.autoOcr,disabled:busy,onChange:e=>{setForm({...form,autoOcr:e.target.checked});setPreviewArgs(null)}}),'确认入库后自动本地识别图片（每批最多5张，不上传第三方；仍需校对）') : null,
     h('div', { style: { ...S.row, flexWrap: 'wrap' } }, h(Btn, { kind: 'primary', disabled: busy, onClick: () => run(true) }, busy ? '采集中…' : '预览采集（不入库）'), previewArgs ? h(Btn, { disabled: busy, onClick: () => run(false) }, '确认入库（按同条件重新采集）') : null),
     error ? h('div', { role: 'alert', style: { ...S.cardTight, color: T.error } }, `未成功：${error}。不会将失败显示为入库成功；如有部分写入，请核对返回明细。`) : null,
     result ? h('div', { style: S.col },
@@ -2569,6 +2570,7 @@ function Panel({ onClose }) {
             h('div', { style: { marginTop: 'auto', paddingTop: 10, ...S.muted, fontSize: 10.5, lineHeight: 1.5 } },
               '对话里让 Agent 调用 career_* 工具，面板会实时刷新。')),
           h('main', { style: { flex: 1, minWidth: 0, overflowY: 'auto', padding: 16 } },
+            h('div',{style:{...S.cardTight,marginBottom:12}},h('div',{style:S.h3},'求职主流程'),h('div',{style:{...S.row,flexWrap:'wrap',marginTop:6}},[['radar','1 找岗位'],['social','2 收集与整理资料'],['studio','3 准备简历'],['tracker','4 投递跟进'],['interview','5 面试复盘']].map(([key,label])=>h(Btn,{key,kind:tab===key?'primary':'ghost',onClick:()=>navigate(key,focusCode)},label))),h('div',{style:{...S.muted,fontSize:11,marginTop:6}},focusCode?'当前已关联岗位；进入简历/面试将带入此岗位。':'先选一个岗位；也可先到知识库采集面经，或到设置登录数据源。')),
             focusNote ? h('div', { style: { ...S.cardTight, marginBottom: 10, borderColor: T.accent, background: 'rgba(37,99,235,0.06)', ...S.body } }, `Agent：${focusNote}`) : null,
             bootstrap.error
               ? h(ErrorBox, { error: bootstrap.error, onRetry: bump })

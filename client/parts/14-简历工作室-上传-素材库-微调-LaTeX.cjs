@@ -621,6 +621,7 @@ function Panel({ onClose }) {
             h('div', { style: { marginTop: 'auto', paddingTop: 10, ...S.muted, fontSize: 10.5, lineHeight: 1.5 } },
               '对话里让 Agent 调用 career_* 工具，面板会实时刷新。')),
           h('main', { style: { flex: 1, minWidth: 0, overflowY: 'auto', padding: 16 } },
+            h('div',{style:{...S.cardTight,marginBottom:12}},h('div',{style:S.h3},'求职主流程'),h('div',{style:{...S.row,flexWrap:'wrap',marginTop:6}},[['radar','1 找岗位'],['social','2 收集与整理资料'],['studio','3 准备简历'],['tracker','4 投递跟进'],['interview','5 面试复盘']].map(([key,label])=>h(Btn,{key,kind:tab===key?'primary':'ghost',onClick:()=>navigate(key,focusCode)},label))),h('div',{style:{...S.muted,fontSize:11,marginTop:6}},focusCode?'当前已关联岗位；进入简历/面试将带入此岗位。':'先选一个岗位；也可先到知识库采集面经，或到设置登录数据源。')),
             focusNote ? h('div', { style: { ...S.cardTight, marginBottom: 10, borderColor: T.accent, background: 'rgba(37,99,235,0.06)', ...S.body } }, `Agent：${focusNote}`) : null,
             bootstrap.error
               ? h(ErrorBox, { error: bootstrap.error, onRetry: bump })

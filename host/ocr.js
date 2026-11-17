@@ -83,6 +83,7 @@ export async function processKnowledgeOcr({id,index=1,action='recognize',text},{
    if(!image.ocr)image.ocr={text:image.agentTranscript.text,requiresReview:true}
   image.ocr={...image.ocr,rawText:image.ocr.rawText??image.ocr.text,text:text===undefined?image.ocr.text:String(text).slice(0,30000),reviewedAt:new Date().toISOString(),reviewed:true,requiresReview:false}
   image.ocrStatus='reviewed'
+  if(image.agentTranscript)image.agentTranscript={...image.agentTranscript,humanConfirmed:true,humanConfirmedAt:new Date().toISOString()}
  }else if(action==='recognize'){
   try{
    const original=await download({url:image.url,dataDir:config.dataDir})
