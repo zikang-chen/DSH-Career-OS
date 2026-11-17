@@ -141,7 +141,7 @@ Client 曾一次拉 120 条、`listJobs` 只有 `LIMIT` 没 `OFFSET`。**已加 
 | **P1（已完成）** | 5 工作区导航（11 页签全保留）+ Dashboard 行动入口 + 待核验/过期卡片 | `client/index.cjs` | 中 |
 | **P2（已完成）** | 采集完整性（reported_total/observed/is_complete, schema v13）+ 岗位分页 offset | `host/schema.js`、`host/repo/captures.js`、`host/repo/jobs.js`、`host/crawl.js`、`host/routes.js`、`host/tools.js` | 中 |
 | **P3（部分）** | 投递行内推进/快速记录已做；提醒去重、漏斗分时间范围未做 | `host/repo/applications.js`、`client` | 中 |
-| **P4（未开始）** | 简历三栏工作台 + 版本 Diff + 质量检查 | `host/tailor.js`、`host/latex.js`、`client` | 高：不编造事实的边界要守住 |
+| **P4（部分）** | 简历质量检查已做（`career_resume_quality`，10 用例）；三栏工作台 + 版本 Diff UI 未做 | `host/quality.js`、`client` | 中 |
 | **P5（未开始）** | 高层任务工作流 + 工具响应统一 + Client 拆分 | `host/tools.js`、`client/*` | 高：兼容性风险最大 |
 
 **执行原则**：每阶段结束必须 183 个测试全绿 + 真实数据验证；不一次性拆掉现有结构。

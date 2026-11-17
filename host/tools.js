@@ -9,6 +9,7 @@ import { assertReplayable, describeJsonShape, parseCurl, replayRequest } from '.
 import { browserProfileDir, capturePageJson, closeBrowser, findBrowserExecutable, openForLogin } from './browser.js'
 import { probePortals, resolvePortal } from './portal.js'
 import { fetchJdDetail, resolveJdProvider } from './jd.js'
+import { checkResumeQuality } from './quality.js'
 import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
@@ -1151,6 +1152,24 @@ export function registerCareerTools(ctx, deps) {
           ? '有失败的：多半是缺 postId（重新抓一次列表就会带上）或接口改版。'
           : (filled.length ? 'JD 已写回岗位库，岗位雷达里双击就能看到正文。' : '没有需要补的。'),
       }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_resume_quality',
+    description: '简历质量检查：列出可核对的问题（缺联系方式、教育缺时间、同机构重复、时间倒挂、技能无依据、JD 要求未覆盖等），分 error/warn/info 三档。只报问题，不替你补内容、不评判好坏。',
+    params: {
+      jobId: S('可选：针对某个岗位检查 JD 覆盖情况'),
+    },
+    handler: (args) => {
+      const job = args.jobId ? repos.jobs.getJob(String(args.jobId)) : null
+      const result = checkResumeQuality({
+        profile: repos.profile.get(),
+        experiences: repos.profile.listExperiences(),
+        documents: repos.profile.listDocuments({}),
+        job,
+      })
+      return { ok: true, ...result, targetJob: job ? { id: job.id, company: job.company_name, title: job.title } : null }
     },
   }))
 
