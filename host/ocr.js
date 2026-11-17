@@ -68,9 +68,20 @@ export async function processKnowledgeOcr({id,index=1,action='recognize',text},{
  const media=Array.isArray(item.media)?structuredClone(item.media):[]
  const at=Number(index)-1;if(!Number.isInteger(at)||at<0||at>=media.length)throw new Error('图片序号无效')
  const image=media[at]
- if(action==='review'){
-  if(!image.ocr?.text)throw new Error('图片尚未识别，没有可核对文字')
-  image.ocr={...image.ocr,text:text===undefined?image.ocr.text:String(text).slice(0,30000),reviewedAt:new Date().toISOString(),reviewed:true}
+ if(action==='agent_prepare'){
+   const original=image.original??await download({url:image.url,dataDir:config.dataDir})
+   image.original=original
+   repos.knowledge.updateMedia(id,media)
+   return {ok:true,id,index,imagePath:original.filePath,sha256:original.sha256,localOcr:image.ocr?.rawText??image.ocr?.text??null,instruction:'使用read_image读取原图后逐字转录，结合本地OCR校错；看不清标〔无法辨认〕，不补造数字或题目。结果用agent_save保存，不能代人工确认。',privacy:'看图将图片交给当前模型服务；不同于本地OCR。'}
+ }else if(action==='agent_save'){
+   if(typeof text!=='string'||!text.trim())throw new Error('需要Agent实际读图后的文字')
+   if(!image.original?.sha256)throw new Error('先准备并读取原图，不接受无图片证据的转录')
+   image.agentTranscript={text:text.slice(0,30000),imageHash:image.original.sha256,createdAt:new Date().toISOString(),status:'ai-reviewed',humanConfirmed:false}
+   image.ocrStatus='ai-reviewed'
+ }else if(action==='review'){
+  if(!image.ocr?.text&&!image.agentTranscript?.text)throw new Error('图片尚未识别，没有可核对文字')
+   if(!image.ocr)image.ocr={text:image.agentTranscript.text,requiresReview:true}
+  image.ocr={...image.ocr,rawText:image.ocr.rawText??image.ocr.text,text:text===undefined?image.ocr.text:String(text).slice(0,30000),reviewedAt:new Date().toISOString(),reviewed:true,requiresReview:false}
   image.ocrStatus='reviewed'
  }else if(action==='recognize'){
   try{

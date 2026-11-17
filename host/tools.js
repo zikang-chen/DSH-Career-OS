@@ -77,7 +77,7 @@ export function registerCareerTools(ctx, deps) {
     if(action!=='list')throw new Error('action必须list/get/update/stats')
     return {ok:true,...repos.knowledge.list(args),stats:repos.knowledge.stats()}
   }}))
-  add(makeTool({name:'career_knowledge_ocr',description:'对知识库关联图片执行本机OCR并保留原图哈希/逐图结果。识别默认待人工核对；不上传第三方、不覆盖作者正文。',params:{action:S('status|recognize；人工核对仅在界面完成'),id:S('知识库资料id'),index:N('图片序号，从1开始')},handler:(args)=>args.action==='status'?ocrStatus({dataDir:config.dataDir}):args.action==='review'?{ok:false,error:'人工核对仅限用户在知识库界面确认，Agent不能代确认'}:processKnowledgeOcr({...args,action:'recognize'},{repos,config})}))
+  add(makeTool({name:'career_knowledge_ocr',description:'对知识库关联图片执行本机OCR并保留原图哈希/逐图结果。识别默认待人工核对；不上传第三方、不覆盖作者正文。',params:{action:S('status|recognize|agent_prepare|agent_save；agent_prepare后必须read_image再保存；人工确认仅在界面'),id:S('知识库资料id'),index:N('图片序号，从1开始'),text:S('Agent实际看图后的逐字转录，不清楚标〔无法辨认〕')},handler:(args)=>args.action==='status'?ocrStatus({dataDir:config.dataDir}):args.action==='review'?{ok:false,error:'人工核对仅限用户在知识库界面确认，Agent不能代确认'}:processKnowledgeOcr({...args,action:args.action??'recognize'},{repos,config})}))
 
   // ── system / profile ───────────────────────────────────────────────────────
   add(makeTool({

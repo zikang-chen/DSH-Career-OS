@@ -57,27 +57,39 @@ function KnowledgeCapture({ onImported }) {
       (result.preview || []).map((item, i) => h('div', { key: item.id || i, style: S.cardTight }, h('div', { style: S.h3 }, item.title || '未命名资料'), h('div', { style: S.muted }, [item.company, item.recruitType, item.bodyStatus].filter(Boolean).join(' · ')), h('div', { style: { ...S.muted, whiteSpace: 'pre-wrap' } }, knowledgeText(item.description || item.desc || item.requirements || '未取得可用正文；标题不代表完整内容').slice(0, 600)), h(KnowledgeLink, { url: item.url }, '查看来源')))) : null)
 }
 function KnowledgeMedia({ itemId, entry, index, onChanged }) {
-  const [text, setText] = useState(entry.ocr?.text || '')
+  const [text, setText] = useState(entry.agentTranscript?.text || entry.ocr?.text || '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const [showImage, setShowImage] = useState(false)
-  useEffect(() => setText(entry.ocr?.text || ''), [entry.ocr?.text])
+  useEffect(() => setText(entry.agentTranscript?.text || entry.ocr?.text || ''), [entry.ocr?.text,entry.agentTranscript?.text])
   const run = async action => {
     setBusy(true); setError(null)
     try { await apiPost('/knowledge/ocr', { id: itemId, index: entry.index || index + 1, action, ...(action === 'review' ? { text } : {}) }); onChanged() }
     catch (err) { setError(err.message); onChanged() } finally { setBusy(false) }
   }
   const url = knowledgeHttp(typeof entry === 'string' ? entry : entry.url)
-  const status = { pending: '图片待 OCR', review: '识别结果待人工核对', reviewed: '已人工核对', failed: '识别失败' }[entry.ocrStatus] || '图片待 OCR'
+  const status = { pending: '图片待 OCR', review: '识别结果待人工核对', reviewed: '已人工核对', 'ai-reviewed': 'Agent已读图 · 待你确认', failed: '识别失败' }[entry.ocrStatus] || '图片待 OCR'
   return h('div', { style: S.cardTight },
     h('div', { style: { ...S.row, flexWrap: 'wrap' } }, h(Chip, { tone: entry.ocrStatus === 'reviewed' ? 'success' : 'warn' }, status), h('span', { style: S.muted }, `媒体 ${entry.index || index + 1}`), h(KnowledgeLink, { url }, '打开原图')),
     h('div', { style: { ...S.row, flexWrap: 'wrap', marginTop: 8 } }, h(Btn, { disabled: busy, onClick: () => run('recognize') }, busy ? '处理中…' : '本地识别'), url ? h(Btn, { kind: 'ghost', onClick: () => setShowImage(!showImage) }, showImage ? '收起原图' : '按需加载原图') : null),
     h('div', { style: { ...S.muted, marginTop: 6 } }, 'Windows 本地 OCR，不上传图片；识别不会自动标记已核对。点击加载原图才会向图片源发出请求。'),
     showImage && url ? h('img', { src: url, alt: `媒体 ${index + 1} 原图`, referrerPolicy: 'no-referrer', style: { maxWidth: '100%', maxHeight: 500, objectFit: 'contain', marginTop: 8 } }) : null,
-    entry.ocr?.text || ['review', 'reviewed'].includes(entry.ocrStatus) ? h('div', { style: { ...S.col, marginTop: 8 } }, h(Field, { label: '核对文字（可编辑）', hint: '请对照原图核对，保存才标记为人工已核对。OCR 置信度未知，不代表准确率。' }, h('textarea', { style: { ...S.textarea, minHeight: 130 }, value: text, onChange: e => setText(e.target.value), disabled: busy })), h(Btn, { disabled: busy, onClick: () => run('review') }, '保存核对文字')) : null,
+    h('div',{style:{...S.cardTight,marginTop:8}}, h('div',{style:S.h3},'交给Agent看图校正'),h('div',{style:S.muted},'会把图片交给当前模型服务，不同于本地识别。复制下列指令到对话；AI校对不会冒充人工确认。'),h('textarea',{readOnly:true,style:{...S.textarea,minHeight:75},value:`请读取知识库资料 ${itemId} 的第 ${entry.index||index+1} 张图片。先用 career_knowledge_ocr action=agent_prepare 获取原图，再用 read_image 真正看图，纠正OCR错字；无法辨认处标注，最后 action=agent_save 保存校对稿，不代我确认。` })),
+    entry.ocr?.text || entry.agentTranscript?.text || ['review', 'reviewed','ai-reviewed'].includes(entry.ocrStatus) ? h('div', { style: { ...S.col, marginTop: 8 } }, h(Field, { label: '核对文字（可编辑）', hint: '请对照原图核对，保存才标记为人工已核对。OCR 置信度未知，不代表准确率。' }, h('textarea', { style: { ...S.textarea, minHeight: 130 }, value: text, onChange: e => setText(e.target.value), disabled: busy })), h(Btn, { disabled: busy, onClick: () => run('review') }, '保存核对文字')) : null,
     error || entry.error ? h('div', { role: 'alert', style: { ...S.muted, color: T.error, marginTop: 6 } }, error || knowledgeText(entry.error)) : null)
 }
 const knowledgeViewMemory = { filters: { query: '', kind: '', company: '', platform: '', status: '' }, offset: 0 }
+function KnowledgeOrganization({ item, onChanged }) {
+  const [form,setForm]=useState({company:item.company||'',role:item.role||'',tags:(item.tags||[]).join('，'),notes:item.notes||''})
+  const [busy,setBusy]=useState(false)
+  const [error,setError]=useState(null)
+  const change=key=>ev=>setForm({...form,[key]:ev.target.value})
+  const save=async()=>{setBusy(true);setError(null);try{await apiPost('/knowledge/update',{id:item.id,...form,tags:form.tags.split(/[,，]/).map(s=>s.trim()).filter(Boolean)});onChanged()}catch(e){setError(e.message)}finally{setBusy(false)}}
+  return h('details',{style:S.cardTight},h('summary',{style:{...S.h3,cursor:'pointer'}},'整理公司、岗位方向与标签'),
+    h('div',{style:{...knowledgeGrid(160),marginTop:8}},h(Field,{label:'关联公司（不确定可留空）'},h('input',{style:S.input,value:form.company,onChange:change('company')})),h(Field,{label:'岗位方向'},h('input',{style:S.input,value:form.role,onChange:change('role')})),h(Field,{label:'标签（逗号分隔）'},h('input',{style:S.input,value:form.tags,onChange:change('tags')}))),
+    h(Field,{label:'个人批注（不修改作者原文）'},h('textarea',{style:S.textarea,value:form.notes,onChange:change('notes')})),
+    h(Btn,{onClick:save,disabled:busy},busy?'保存中…':'保存整理'),error?h('div',{role:'alert',style:{...S.muted,color:T.error}},error):null)
+}
 function SocialTab({ onNavigate } = {}) {
   const [filters, setFilters] = useState(knowledgeViewMemory.filters)
   const [offset, setOffset] = useState(knowledgeViewMemory.offset)
@@ -115,10 +127,10 @@ function SocialTab({ onNavigate } = {}) {
       h('div', { style: { ...S.h3, overflowWrap: 'anywhere' } }, entry.title || '未命名资料'),
       h('div', { style: S.muted }, [entry.company, entry.role, entry.platform, fmtDate(entry.publishedAt)].filter(Boolean).join(' · ')),
       h('div', { style: { ...S.muted, margin: '8px 0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, knowledgeText(entry.summary || entry.body || '暂无摘要，请打开原文核对。').slice(0, 220)),
-      h('div', { style: S.muted }, `完整度：${knowledgeText(entry.completeness) || '未评估'} · 媒体内容需核对，图片待 OCR`),
+      h('div', { style: S.muted }, `文字完整度：${knowledgeText(entry.completeness) || '未评估'} · 图片 ${(entry.media||[]).length} 张 / 待核对 ${(entry.media||[]).filter(m=>m.ocrStatus!=='reviewed').length} 张`),
       h('div', { style: { ...S.row, marginTop: 10 } }, h(Btn, { onClick: () => { setDetailId(entry.id); setUpdateError(null) } }, '打开原文与来源'), h(KnowledgeLink, { url: entry.url }, '原始链接'))))),
     h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap' } }, h(Btn, { disabled: offset === 0 || list.loading, onClick: () => setOffset(Math.max(0, offset - 20)) }, '上一页'), h('span', { style: S.muted }, `第 ${Math.floor(offset / 20) + 1} 页`), h(Btn, { disabled: list.loading || offset + 20 >= (list.data?.total || 0), onClick: () => setOffset(offset + 20) }, '下一页')),
-    panel('采集资料 · 先预览后入库', h(KnowledgeCapture, { onImported: refresh })),
+    h('div',{style:S.card},h('div',{style:S.h2},'① 收集资料 → ② 确认入库 → ③ 分类与读图校正'),h(KnowledgeCapture,{onImported:refresh})),
     panel('手工导入经验 / 招聘 Bar / 搜索线索', h(SocialLegacyTools, { onImported: refresh })),
     detailId ? h(Modal, { title: item?.title || '资料详情', subtitle: '原文与来源 · 不将第三方内容当作官方结论', onClose: () => setDetailId(null), width: 860 },
       detail.loading ? h(Loading) : detail.error ? h(ErrorBox, { error: detail.error, onRetry: detail.reload }) : item ? h('div', { style: S.col },
