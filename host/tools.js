@@ -10,9 +10,11 @@ import { browserProfileDir, capturePageJson, closeBrowser, findBrowserExecutable
 import { probePortals, resolvePortal } from './portal.js'
 import { fetchJdDetail, resolveJdProvider } from './jd.js'
 import { checkResumeQuality } from './quality.js'
-import { findJobsForMe, prepResumeForJob, summarizeApplications } from './workflows.js'
+import { findJobsForMe, jdCompleteness, prepResumeForJob, summarizeApplications } from './workflows.js'
 import { envelope } from './envelope.js'
 import { buildInterviewPlan } from './interview.js'
+import { SITE_PROFILES, getSiteProfile } from './sites.js'
+import { RESUME_SKILLS, analyzeBullets } from './resume_skills.js'
 import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
@@ -87,7 +89,7 @@ export function registerCareerTools(ctx, deps) {
         dataDir: config.dataDir,
         limits: {
           supportedResumeFormats: ['.md', '.txt', '.docx', '.pdf'],
-          blockedSources: '第三方招聘平台与论坛需登录/反爬，系统不抓取；用 career_forum_import 手动导入。',
+          blockedSources: '第三方招聘平台与论坛需登录：用「专用浏览器 + CDP」复用你的登录态采集（career_site_capture：site=xhs/boss/51job/offershow），不破解签名、不绕登录、单页低频；也可用 career_forum_import 手动导入。',
         },
       }
     },
@@ -1247,6 +1249,190 @@ export function registerCareerTools(ctx, deps) {
         nextActions: ['确认挑选结果后调用 career_resume_build 出稿'],
         meta: { tool: 'career_prep_resume', jdLevel: result.jdCompleteness?.level ?? null },
       })
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_site_capture',
+    description: '按站点采集：小红书（笔记/面经）、BOSS直聘、前程无忧（岗位）。用专用浏览器打开你已登录的搜索页，读页面自己发出的 JSON 并解析。首次默认只预览（dryRun=true），确认后再写入。',
+    params: {
+      site: S('站点：xhs | boss | 51job'),
+      keyword: S('搜索关键词（必填）'),
+      city: S('城市（BOSS 用城市码或名称，可选）'),
+      url: S('直接给搜索页 URL（可选，优先于自动拼接）'),
+      useOpenTab: B('从你已打开的同源标签页抓（会重载），默认 false'),
+      dryRun: B('只预览不写库，默认 true（安全）'),
+      limit: N('最多导入/预览多少条，默认 30'),
+    },
+    required: ['site'],
+    handler: async (args) => {
+      const profile = getSiteProfile(args.site)
+      if (!profile) return { ok: false, error: `未知站点「${args.site}」`, sites: Object.keys(SITE_PROFILES).map((k) => ({ key: k, label: SITE_PROFILES[k].label })) }
+      const keyword = str(args.keyword, 100)
+      const targetUrl = str(args.url, 2000) ?? (keyword ? profile.searchUrl({ keyword, city: str(args.city, 60) ?? undefined }) : null)
+      if (!targetUrl) return { ok: false, error: '需要 keyword 或 url' }
+
+      const captured = await capturePageJson({
+        dataDir: config.dataDir,
+        url: targetUrl,
+        matchUrl: args.useOpenTab === true ? targetUrl : undefined,
+        patterns: profile.patterns,
+        timeoutMs: Math.min(Number(args.timeoutMs ?? 25000), 60000),
+        logger,
+      })
+      if (!captured.ok) {
+        return {
+          ok: false,
+          site: profile.key,
+          stage: 'capture',
+          error: captured.error,
+          candidates: captured.candidates ?? [],
+          next: `先在 career_browser_login 登录 ${profile.loginUrl}，在页面上完成一次搜索让列表出现，再用 useOpenTab=true 重试。${profile.note}`,
+        }
+      }
+      const items = profile.parse(captured.captured.json) || []
+      if (!items.length) {
+        return {
+          ok: false,
+          site: profile.key,
+          stage: 'parse',
+          capturedUrl: captured.captured.url,
+          responseShape: describeJsonShape(captured.captured.json),
+          candidates: captured.candidates,
+          next: '抓到的响应里没解析出内容——看 responseShape 判断是不是配置接口，或换 useOpenTab 重试。',
+        }
+      }
+      const limited = items.slice(0, Math.min(Number(args.limit ?? 30), 200))
+      if (args.dryRun !== false) {
+        return { ok: true, site: profile.key, dryRun: true, found: items.length, preview: limited.slice(0, 20), next: '确认后传 dryRun=false 写入。' }
+      }
+
+      if (profile.kind === 'job') {
+        const imported = repos.jobs.importPostings(limited.map((it) => ({
+          company: it.company, title: it.title, location: it.location,
+          salaryText: it.salaryText, jobCode: it.jobCode, url: it.url, applyUrl: it.url,
+        })), { pageUrl: captured.captured.url, official: false, sourceName: `${profile.label}（CDP 采集，未核验）` })
+        panel.publish({ kind: 'jobs' })
+        return { ok: true, site: profile.key, dryRun: false, found: items.length, created: imported.created.length, merged: imported.merged.length, failed: imported.failed.slice(0, 5), next: '岗位已入库（UNVERIFIED），可在岗位雷达查看。' }
+      }
+
+      // 笔记/面经 → 资料库（forum_post），自带内容哈希去重
+      let saved = 0
+      let duplicate = 0
+      for (const it of limited) {
+        const content = [it.title, it.desc].filter(Boolean).join('\n\n')
+        if (!content) continue
+        const post = repos.intel.addForumPost({
+          platform: 'xiaohongshu', content, url: it.url, title: it.title, author: it.author,
+          publishedAt: it.publishedAt ?? undefined, accessMode: 'public_page',
+        })
+        if (post.duplicate) duplicate += 1
+        else saved += 1
+      }
+      return { ok: true, site: profile.key, dryRun: false, found: items.length, saved, duplicate, next: '笔记已入资料库（论坛情报），可在「面试准备/论坛」查看，并作为面试调研素材。' }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_resume_skill',
+    description: '简历优化 skill：列出把杂乱经历包装成 JD 定向简历的方法论（XYZ/STAR/量化/强动词/JD 关键词对齐/科研转译/精简/缺口诚实），并对每条要点给出诊断与改写方向。只诊断不编造。',
+    params: {
+      jobId: S('目标岗位 id（可选，用它的 JD 做关键词对齐）'),
+      jd: S('或直接给 JD 文本'),
+      text: S('要诊断的要点（每行一条；不传则用素材库全部要点）'),
+      maxSkills: N('最多列几个方法论，默认全部'),
+    },
+    handler: (args) => {
+      const job = args.jobId ? repos.jobs.getJob(String(args.jobId)) : null
+      const jdText = str(args.jd, 20000) ?? (job ? [job.description, job.requirements].filter(Boolean).join('\n') : '')
+      let bullets
+      if (args.text) bullets = String(args.text).split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
+      else bullets = repos.profile.listExperiences().flatMap((e) => e.bullets ?? [])
+      const analysis = analyzeBullets({ bullets, jdText })
+      return {
+        ok: true,
+        targetJob: job ? { id: job.id, company: job.company_name, title: job.title } : null,
+        ...analysis,
+        skills: analysis.skills.slice(0, Number(args.maxSkills ?? RESUME_SKILLS.length)),
+      }
+    },
+  }))
+
+  add(makeTool({
+    name: 'career_job_research',
+    description: '针对某个岗位做一页调研：JD（库里已有就直接用，否则提示去官方/站点抓）+ 小红书相关笔记（面经/线索）+ OfferShow 薪资爆料，汇总成调研包。需要对应站点已用专用浏览器登录；没登录会诚实返回登录指引。',
+    params: {
+      jobId: S('岗位 id（推荐）'),
+      company: S('公司名（没有 jobId 时用）'),
+      title: S('岗位名（没有 jobId 时用）'),
+      keyword: S('自定义搜索关键词（默认「公司 岗位 面经」）'),
+      includeXhs: B('是否采集小红书，默认 true'),
+      includeOffershow: B('是否采集 OfferShow，默认 true'),
+      useOpenTab: B('从你已打开的同源标签页抓（会重载），默认 false'),
+    },
+    handler: async (args) => {
+      let job = args.jobId ? repos.jobs.getJob(String(args.jobId)) : null
+      const company = str(args.company, 120) ?? job?.company_name ?? null
+      const title = str(args.title, 200) ?? job?.title ?? null
+      if (!job && company && title) {
+        const hits = repos.jobs.listJobs({ company, limit: 300 }, repos.profile.get())
+        job = hits.find((j) => String(j.title).includes(title) || title.includes(String(j.title))) ?? null
+      }
+      const jdText = job ? [job.description, job.requirements].filter(Boolean).join('\n') : ''
+      const result = {
+        ok: true,
+        target: { jobId: job?.id ?? null, company, title },
+        jd: job
+          ? { available: Boolean(jdText.trim()), completeness: jdCompleteness(job), source: '岗位库', status: job.status, location: job.location, applyUrl: job.apply_url ?? null }
+          : { available: false, note: '岗位库里没有这个岗位；可先用 career_campus_portal + career_browser_capture 抓官方岗位，或粘贴 JD。' },
+        xhs: null,
+        offershow: null,
+        caveats: [],
+      }
+
+      const kw = str(args.keyword, 120) ?? [company, title, '面经'].filter(Boolean).join(' ')
+      if (args.includeXhs !== false && kw.trim()) {
+        const prof = getSiteProfile('xhs')
+        const cap = await capturePageJson({
+          dataDir: config.dataDir, url: prof.searchUrl({ keyword: kw }),
+          matchUrl: args.useOpenTab === true ? prof.searchUrl({ keyword: kw }) : undefined,
+          patterns: prof.patterns, timeoutMs: 20000, logger,
+        })
+        if (cap.ok) {
+          const notes = prof.parse(cap.captured.json).slice(0, 10)
+          result.xhs = notes.length
+            ? { ok: true, count: notes.length, notes, sourceUrl: cap.captured.url }
+            : { ok: false, error: '抓到了响应但没解析出笔记', responseShape: describeJsonShape(cap.captured.json) }
+        } else {
+          result.xhs = { ok: false, error: cap.error, loginUrl: prof.loginUrl, next: '先 career_browser_login 登录小红书，搜一次让列表出现，再用 useOpenTab=true 重试。' }
+        }
+      }
+      if (args.includeOffershow !== false && company) {
+        const prof = getSiteProfile('offershow')
+        const cap = await capturePageJson({
+          dataDir: config.dataDir, url: prof.searchUrl({ keyword: company }),
+          matchUrl: args.useOpenTab === true ? prof.searchUrl({ keyword: company }) : undefined,
+          patterns: prof.patterns, timeoutMs: 20000, logger,
+        })
+        if (cap.ok) {
+          const reports = prof.parse(cap.captured.json).slice(0, 10)
+          result.offershow = reports.length
+            ? { ok: true, count: reports.length, reports, sourceUrl: cap.captured.url, evidenceLevel: 'C' }
+            : { ok: false, error: '抓到了响应但没解析出薪资爆料', responseShape: describeJsonShape(cap.captured.json) }
+        } else {
+          result.offershow = { ok: false, error: cap.error, loginUrl: prof.loginUrl, next: '先 career_browser_login 登录 offershow.cn，再用 useOpenTab 重试。' }
+        }
+      }
+
+      result.caveats = [
+        '小红书笔记与 OfferShow 爆料都是用户生成内容，属 C 级证据，样本小、可能有偏，别当成官方结论。',
+        '薪资爆料只作参考，不作为谈薪依据；官方 JD 与招聘状态以企业官网为准。',
+        '采集依赖你自己已登录的浏览器，不破解签名、不绕登录，单页低频。',
+      ]
+      result.next = result.jd.available
+        ? '已拿到 JD；可继续用 career_jd_interview 生成面试题，或用 career_prep_resume 出简历。'
+        : '先把 JD 弄进岗位库（career_campus_portal → career_browser_capture，或直接粘贴 JD）。'
+      return result
     },
   }))
 

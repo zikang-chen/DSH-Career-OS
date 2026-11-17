@@ -7,6 +7,7 @@ import { analyzeMatch } from './domain.js'
 import { computeFunnel } from './funnel.js'
 import { planTailor } from './tailor.js'
 import { checkResumeQuality } from './quality.js'
+import { analyzeBullets } from './resume_skills.js'
 
 /** 判断 JD 完整性：有正文才算完整，只有标题/地点算「仅列表摘要」。 */
 export function jdCompleteness(job = {}) {
@@ -113,6 +114,11 @@ export function prepResumeForJob({ profile, experiences = [], documents = [], jo
   const completeness = jdCompleteness(job)
   const plan = planTailor({ experiences, job, maxEntries, bulletsPerEntry })
   const quality = checkResumeQuality({ profile, experiences, documents, job })
+  // 简历优化 skill：对挑中的要点做诊断（不新造内容）
+  const skillAdvice = analyzeBullets({
+    bullets: plan.selected.flatMap((s) => s.bullets ?? []),
+    jdText: [job.description, job.requirements].filter(Boolean).join('\n'),
+  })
   return {
     ok: true,
     job: { id: job.id, company: job.company_name, title: job.title },
@@ -127,6 +133,7 @@ export function prepResumeForJob({ profile, experiences = [], documents = [], jo
     },
     gaps: plan.gaps,
     quality: { summary: quality.summary, issues: quality.issues },
+    skillAdvice: { summary: skillAdvice.summary, perBullet: skillAdvice.perBullet, jdCoverage: skillAdvice.jdCoverage, skills: skillAdvice.skills.map((s) => s.name) },
     next: '只挑选与排序，没有编造任何内容。确认后再调用 career_resume_build 出稿并编译 PDF。',
   }
 }

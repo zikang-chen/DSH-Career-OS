@@ -334,6 +334,9 @@ Agent 调 `career_doc_ingest`，自动分类 + 抽分（托福/雅思/四六级/
 | **我的投递进展（一步到位）** | 「我的投递进展怎么样」→ `career_my_progress` |
 | **为这个岗位准备简历（一步到位）** | 「为这个岗位准备简历」→ `career_prep_resume` |
 | **给 JD 出面试题与知识点** | 「这是我拿到的 JD，帮我分析可能的面试问题和知识点」→ `career_jd_interview` |
+| **一站调研某岗位**（JD+小红书+OfferShow） | 「帮我调研腾讯 AI 产品经理这个岗位」→ `career_job_research` |
+| 抓 BOSS/前程无忧/小红书 | 「登录后抓 BOSS 的 X 岗位」→ `career_site_capture {site:'boss'\\|'51job'\\|'xhs'\\|'offershow'}` |
+| 简历怎么写更好 | 「用简历 skill 检查这几条要点」→ `career_resume_skill` |
 | 检查简历质量 | 「检查一下我的简历」→ `career_resume_quality` |
 | 要某公司校招地址 | 「腾讯校招官网在哪」 |
 | 登录并抓岗位 | 「帮我登录腾讯」→ 登录后 →「抓一下腾讯的实习生岗位」 |

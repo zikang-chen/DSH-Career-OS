@@ -167,6 +167,8 @@ career_browser_capture {url:"…", company:"腾讯"}   → 抓取入库
 - [项目介绍 · 功能讲解 · 架构](docs/PROJECT.md)
 - [进度与功能清单](docs/STATUS.md)
 - [代码审计与优化计划](docs/AUDIT.md)
+- [数据采集调研结论（小红书/BOSS/51job/OfferShow）](docs/SOURCES-RESEARCH.md)
+- [简历优化 Skill 库](docs/resume-skills.md)
 - [架构与技术决策](docs/architecture.md)
 - [数据模型与状态机](docs/data-model.md)
 - [数据源政策与合规边界](docs/source-policy.md)
@@ -187,6 +189,6 @@ node scripts\setup-runtime.mjs       # 装 PDF 解析依赖到项目内 runtime/
 
 ## 现状
 
-schema **v13** / ftsMode `trigram` / **79 工具** / 20 个测试套件 225 个用例全绿 / 面板已进入 Web boot graph。
+schema **v13** / ftsMode `trigram` / **82 工具** / 22 个测试套件 239 个用例全绿 / 面板已进入 Web boot graph。
 `data/` 与 `runtime/` 不入库（含真实简历与联系方式）；新机器克隆后跑一次 `scripts/setup-runtime.mjs` 即可。
 详见 [docs/acceptance-report.md](docs/acceptance-report.md) 与 [docs/environment.md](docs/environment.md)。

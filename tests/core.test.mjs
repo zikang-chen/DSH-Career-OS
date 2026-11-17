@@ -453,18 +453,19 @@ describe('monitoring and source health', () => {
     }
   })
 
-  it('declares blocked sources instead of pretending to collect them', () => {
+  it('declares login-required sources as browser_session, never auto-collected', () => {
     const env = makeEnv()
     try {
-      const blocked = CONNECTOR_META.filter((c) => c.accessMode === 'blocked')
-      assert.ok(blocked.length >= 2, 'job boards and social platforms are declared blocked')
-      for (const entry of blocked) {
-        assert.equal(entry.enabled, false)
+      const gated = CONNECTOR_META.filter((c) => c.accessMode === 'browser_session')
+      assert.ok(gated.length >= 2, 'job boards / social platforms require the user session')
+      for (const entry of gated) {
+        assert.equal(entry.needsUser, true)
         assert.ok(entry.rateLimitNote.length > 10)
       }
+      // 不得把需要登录的平台伪装成 public_page 自动可用
+      assert.ok(!CONNECTOR_META.some((c) => ['job_board', 'social_platform'].includes(c.connector) && c.accessMode === 'public_page'))
       const suggestion = suggestSocialQueries({ company: '字节跳动', role: '产品经理' })
       assert.ok(suggestion.links.length > 0)
-      assert.match(suggestion.note, /不会自动抓取/)
     } finally {
       env.cleanup()
     }

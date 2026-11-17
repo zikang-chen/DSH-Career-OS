@@ -16,6 +16,9 @@ import { DOC_LABEL, proposeDocument } from './documents.js'
 import { buildApplyCard, renderApplyCardText } from './applycard.js'
 import { checkResumeQuality } from './quality.js'
 import { buildInterviewPlan } from './interview.js'
+import { SITE_PROFILES, getSiteProfile } from './sites.js'
+import { capturePageJson } from './browser.js'
+import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
 import { parsePastedJob } from './sources.js'
 import { sha1ish } from './util.js'
@@ -273,6 +276,42 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
       realExperiences: real,
       research: Array.isArray(body.research) ? body.research : [],
     })
+  })
+
+  route('GET', '/sites', () => ({ ok: true, sites: Object.values(SITE_PROFILES).map((s) => ({ key: s.key, label: s.label, kind: s.kind, loginUrl: s.loginUrl, note: s.note })) }))
+
+  route('POST', '/site/capture', async ({ body }) => {
+    const profile = getSiteProfile(body.site)
+    if (!profile) throw new HttpError('未知站点')
+    const keyword = str(body.keyword, 100)
+    const targetUrl = str(body.url, 2000) ?? (keyword ? profile.searchUrl({ keyword, city: str(body.city, 60) ?? undefined }) : null)
+    if (!targetUrl) throw new HttpError('需要 keyword 或 url')
+    const captured = await capturePageJson({
+      dataDir: config.dataDir, url: targetUrl,
+      matchUrl: body.useOpenTab === true ? targetUrl : undefined,
+      patterns: profile.patterns, timeoutMs: Math.min(Number(body.timeoutMs ?? 25000), 60000), logger,
+    })
+    if (!captured.ok) return { ok: false, stage: 'capture', error: captured.error, candidates: captured.candidates ?? [], loginUrl: profile.loginUrl }
+    const items = profile.parse(captured.captured.json) || []
+    if (!items.length) return { ok: false, stage: 'parse', responseShape: describeJsonShape(captured.captured.json), candidates: captured.candidates }
+    const limited = items.slice(0, Math.min(Number(body.limit ?? 30), 200))
+    if (body.dryRun !== false) return { ok: true, dryRun: true, site: profile.key, found: items.length, preview: limited.slice(0, 20) }
+    if (profile.kind === 'job') {
+      const imported = repos.jobs.importPostings(limited.map((it) => ({
+        company: it.company, title: it.title, location: it.location, salaryText: it.salaryText, jobCode: it.jobCode, url: it.url, applyUrl: it.url,
+      })), { pageUrl: captured.captured.url, official: false, sourceName: `${profile.label}（CDP 采集，未核验）` })
+      panel.publish({ kind: 'jobs' })
+      return { ok: true, dryRun: false, created: imported.created.length, merged: imported.merged.length }
+    }
+    let saved = 0
+    let duplicate = 0
+    for (const it of limited) {
+      const content = [it.title, it.desc].filter(Boolean).join('\n\n')
+      if (!content) continue
+      const post = repos.intel.addForumPost({ platform: 'xiaohongshu', content, url: it.url, title: it.title, author: it.author, publishedAt: it.publishedAt ?? undefined, accessMode: 'public_page' })
+      if (post.duplicate) duplicate += 1; else saved += 1
+    }
+    return { ok: true, dryRun: false, saved, duplicate }
   })
 
   route('GET', '/monitor/rules', () => ({ ok: true, rules: repos.monitor.listRules() }))
