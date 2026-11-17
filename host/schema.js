@@ -2,7 +2,7 @@
 // and is recorded in `schema_migrations`. Never edit an applied migration — append a
 // new one instead, so existing databases keep their history and user data.
 
-export const SCHEMA_VERSION = 12
+export const SCHEMA_VERSION = 13
 
 /**
  * @type {Array<{version:number,name:string,sql:string}>}
@@ -705,6 +705,19 @@ ALTER TABLE company_capture ADD COLUMN seen_codes TEXT;
     sql: `
 ALTER TABLE job ADD COLUMN post_id TEXT;
 CREATE INDEX idx_job_post_id ON job(post_id);
+`,
+  },
+  {
+    version: 13,
+    name: 'capture-completeness',
+    // 采集完整性：列表接口常报一个总数（字节 count=6559），但一次只取 10 条。
+    // 不记录这个差距，就无法区分「只抓到一部分」和「岗位就是这么多」，
+    // 也会把「没抓到」误当成「已关闭」。这里把总数、实际观测数、是否完整都记下来。
+    sql: `
+ALTER TABLE company_capture ADD COLUMN reported_total INTEGER;
+ALTER TABLE company_capture ADD COLUMN observed_count INTEGER;
+ALTER TABLE company_capture ADD COLUMN is_complete INTEGER;
+ALTER TABLE company_capture ADD COLUMN parse_warnings TEXT;
 `,
   },
 ]

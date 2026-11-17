@@ -3,7 +3,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { APPLICATION_LABEL, APPLICATION_STATUSES, INTERNSHIP_LABEL, JOB_STATUSES, MATCH_BANDS, RECRUIT_LABEL, RECRUIT_TYPES, STATUS_LABEL, analyzeMatch, extractSkills } from './domain.js'
-import { crawlListing, postingToJob, walkJsonForPostings } from './crawl.js'
+import { crawlListing, extractReportedTotal, postingToJob, walkJsonForPostings } from './crawl.js'
 import { ATS_SPECS, detectAts, fetchAtsPostings, normalizeAtsPayload } from './ats.js'
 import { assertReplayable, describeJsonShape, parseCurl, replayRequest } from './curl.js'
 import { browserProfileDir, capturePageJson, closeBrowser, findBrowserExecutable, openForLogin } from './browser.js'
@@ -821,6 +821,7 @@ export function registerCareerTools(ctx, deps) {
       const companyName = company ?? withCompany[0]?.company ?? null
       const ckey = companyKey(companyName ?? '')
       const scopeKey = scopeKeyOf(args.scope ?? null)
+      const reportedTotal = extractReportedTotal(captured.captured.json)
       const previousCapture = ckey ? repos.captures.latest(ckey, scopeKey) : null
       const freshness = captureFreshness(previousCapture?.captured_at ?? null)
       const beforeJobs = ckey ? repos.captures.currentJobs(companyName, ckey) : []
@@ -887,6 +888,11 @@ export function registerCareerTools(ctx, deps) {
           created: imported.created.length,
           merged: imported.merged.length,
           seenCodes: batchRows.map((row) => row.jobCode).filter(Boolean),
+          // 采集完整性：列表接口报的总数 vs 本次实际拿到的条数。
+          reportedTotal,
+          observedCount: postings.length,
+          isComplete: reportedTotal === null ? null : postings.length >= reportedTotal,
+          parseWarnings: imported.failed?.length ? imported.failed.slice(0, 10).map((f) => String(f.error ?? f.title ?? '')) : null,
           stats: { strategy, parsed: withCompany.length, jdSnapshots: savedSnapshots },
           note: 'career_browser_capture',
         })
@@ -933,6 +939,16 @@ export function registerCareerTools(ctx, deps) {
         failed: imported.failed.slice(0, 10),
         sample: preview.slice(0, 10),
         jdFill,
+        completeness: {
+          reportedTotal,
+          observed: postings.length,
+          isComplete: reportedTotal === null ? null : postings.length >= reportedTotal,
+          note: reportedTotal === null
+            ? '接口没有返回总数，无法判断是否抓全。'
+            : (postings.length >= reportedTotal
+              ? `接口报共 ${reportedTotal} 条，本次全部拿到。`
+              : `接口报共 ${reportedTotal} 条，本次只拿到 ${postings.length} 条——**这不代表其余岗位已关闭**，只是没翻页。`),
+        },
         freshness: {
           previousCaptureAt: previousCapture?.captured_at ?? null,
           previousScope: previousCapture?.scope ?? null,
@@ -1039,6 +1055,14 @@ export function registerCareerTools(ctx, deps) {
           lastCapturedAt: latest?.captured_at ?? null,
           lastScope: latest?.scope ?? null,
           lastFound: latest?.found ?? 0,
+          completeness: latest
+            ? {
+              reportedTotal: latest.reported_total ?? null,
+              observed: latest.observed_count ?? latest.found ?? 0,
+              isComplete: latest.is_complete === null || latest.is_complete === undefined ? null : Boolean(latest.is_complete),
+              parseWarnings: latest.parseWarnings ?? [],
+            }
+            : null,
           freshness,
           stale: freshness.stale,
           history: repos.captures.history(key, limit),

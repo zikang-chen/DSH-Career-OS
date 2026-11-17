@@ -187,6 +187,6 @@ node scripts\setup-runtime.mjs       # 装 PDF 解析依赖到项目内 runtime/
 
 ## 现状
 
-schema **v12** / ftsMode `trigram` / **74 工具** / 13 个测试套件 183 个用例全绿 / 面板已进入 Web boot graph。
+schema **v13** / ftsMode `trigram` / **74 工具** / 14 个测试套件 187 个用例全绿 / 面板已进入 Web boot graph。
 `data/` 与 `runtime/` 不入库（含真实简历与联系方式）；新机器克隆后跑一次 `scripts/setup-runtime.mjs` 即可。
 详见 [docs/acceptance-report.md](docs/acceptance-report.md) 与 [docs/environment.md](docs/environment.md)。

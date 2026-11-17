@@ -424,6 +424,21 @@ export async function crawlListing(url, opts = {}) {
   }
 }
 
+/** 从列表响应里找「总共有多少条」。找不到就返回 null，不猜。 */
+export function extractReportedTotal(payload) {
+  if (!payload || typeof payload !== 'object') return null
+  const candidates = [
+    payload.count, payload.total, payload.totalCount, payload.total_count,
+    payload?.data?.count, payload?.data?.total, payload?.data?.totalCount, payload?.data?.total_count,
+    payload?.result?.count, payload?.result?.total,
+  ]
+  for (const value of candidates) {
+    const n = Number(value)
+    if (Number.isFinite(n) && n >= 0) return n
+  }
+  return null
+}
+
 /** Normalize one crawled posting into the shape `JobRepo.upsertJob` accepts. */
 export function postingToJob(posting, { company, pageUrl, pageText } = {}) {
   const haystack = [posting.title, posting.description, posting.department, posting.recruitTypeText, pageText].filter(Boolean).join('\n')

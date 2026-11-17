@@ -131,13 +131,17 @@ export class CaptureRepo {
     const id = uuid()
     const seen = Array.isArray(input.seenCodes) ? [...new Set(input.seenCodes.filter(Boolean).map(String))] : null
     this.db.run(
-      `INSERT INTO company_capture (id, company_key, company_name, source_url, scope, scope_key, captured_at, found, created, merged, stats, note, seen_codes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO company_capture (id, company_key, company_name, source_url, scope, scope_key, captured_at, found, created, merged, stats, note, seen_codes, reported_total, observed_count, is_complete, parse_warnings)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, str(input.companyKey, 120), str(input.companyName, 200), str(input.sourceUrl, 1000),
         str(input.scope, 500), str(input.scopeKey, 500) ?? 'all', nowIso(),
         Number(input.found ?? 0), Number(input.created ?? 0), Number(input.merged ?? 0),
         input.stats ? JSON.stringify(input.stats) : null, str(input.note, 1000),
-        seen ? JSON.stringify(seen) : null],
+        seen ? JSON.stringify(seen) : null,
+        input.reportedTotal === undefined || input.reportedTotal === null ? null : Number(input.reportedTotal),
+        input.observedCount === undefined || input.observedCount === null ? Number(input.found ?? 0) : Number(input.observedCount),
+        input.isComplete === undefined || input.isComplete === null ? null : (input.isComplete ? 1 : 0),
+        input.parseWarnings ? JSON.stringify(input.parseWarnings) : null],
     )
     return this.get(id)
   }
@@ -145,7 +149,13 @@ export class CaptureRepo {
   get(id) {
     const row = this.db.get('SELECT * FROM company_capture WHERE id = ?', [id])
     if (!row) return null
-    return { ...row, stats: parseJson(row.stats, null), seenCodes: parseJson(row.seen_codes, null) }
+    return {
+      ...row,
+      stats: parseJson(row.stats, null),
+      seenCodes: parseJson(row.seen_codes, null),
+      parseWarnings: parseJson(row.parse_warnings, null),
+      isComplete: row.is_complete === null || row.is_complete === undefined ? null : Boolean(row.is_complete),
+    }
   }
 
   /** 最近一次抓取（可按筛选范围过滤）。同一毫秒内的插入用 rowid 定序，避免取错。 */

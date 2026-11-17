@@ -134,6 +134,7 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
       minScore: query.get('minScore') ?? undefined,
       deadlineBefore: query.get('deadlineBefore') ?? undefined,
       limit: Number(query.get('limit') ?? 100),
+      offset: Number(query.get('offset') ?? 0),
     }, profile)
     return {
       ok: true,

@@ -286,6 +286,8 @@ function OverviewTab({ bootstrap, onNavigate, onRefresh }) {
   const cards = [
     { label: '在库岗位', value: jobStats.total ?? 0, hint: '只统计本机数据库' },
     { label: '官方确认在招', value: (jobStats.byStatus ?? {}).OPEN ?? 0, hint: '需近期核验过' },
+    { label: '待核验', value: (jobStats.byStatus ?? {}).UNVERIFIED ?? 0, hint: '来自第三方线索' },
+    { label: '数据过期', value: (jobStats.byStatus ?? {}).STALE ?? 0, hint: '超期需重新核验' },
     { label: '投递记录', value: applicationStats.total ?? 0, hint: '含全部阶段' },
     { label: '未读提醒', value: dig.unreadNotifications ?? 0, hint: '来自监控规则' },
   ]
@@ -298,6 +300,16 @@ function OverviewTab({ bootstrap, onNavigate, onRefresh }) {
       h('div', { style: { ...S.muted, fontSize: 11.5 } }, c.label),
       h('div', { style: { fontSize: 22, fontWeight: 700, color: T.text, margin: '2px 0' } }, String(c.value ?? 0)),
       h('div', { style: { ...S.muted, fontSize: 11 } }, c.hint)))),
+
+    // 行动入口：首页不是统计报表，每个按钮都要能立刻去做事
+    h('div', { style: S.card },
+      h('div', { style: S.h2 }, '开始做事'),
+      h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 8 } },
+        h(Btn, { kind: 'primary', onClick: () => onNavigate('radar') }, '找岗位'),
+        h(Btn, { onClick: () => onNavigate('tracker') }, '看投递'),
+        h(Btn, { onClick: () => onNavigate('resume') }, '改简历'),
+        h(Btn, { onClick: () => onNavigate('plan') }, '看计划'),
+        h(Btn, { kind: 'ghost', onClick: () => onNavigate('settings') }, '数据源与监控'))),
 
     h('div', { style: S.grid(300) },
       h('div', { style: S.card },
@@ -1512,6 +1524,18 @@ const TABS = [
   { key: 'settings', label: '设置', icon: '⚙' },
 ]
 
+/**
+ * 5 个工作区：把 11 个页签归组，但**每个原有页签都还在**（没有删除任何功能）。
+ * 这样左侧导航从 11 行压到 5 组，找人找事更快；老入口点一下仍然是原来那个页面。
+ */
+const WORKSPACES = [
+  { key: 'home', label: '总览', hint: '今天做什么', tabs: ['overview', 'plan'] },
+  { key: 'opportunities', label: '机会', hint: '发现与比较岗位', tabs: ['radar', 'company', 'industry', 'social', 'interview'] },
+  { key: 'applications', label: '投递', hint: '推进与复盘', tabs: ['tracker'] },
+  { key: 'resume', label: '简历', hint: '素材与出稿', tabs: ['resume', 'studio'] },
+  { key: 'settings', label: '设置', hint: '数据源与系统', tabs: ['settings'] },
+]
+
 // ─── 秋招 / 春招作战计划 ─────────────────────────────────────────────────────
 function PlanTab({ onChanged }) {
   const [plan, setPlan] = useState(null)
@@ -2237,15 +2261,25 @@ function Panel({ onClose }) {
             h(Btn, { kind: 'ghost', onClick: onClose }, '关闭'))),
         h('div', { style: { display: 'flex', flex: 1, minHeight: 0 } },
           h('nav', { className: 'careeros-nav', style: { width: 176, flex: '0 0 auto', borderRight: `1px solid ${T.border}`, background: T.surface, padding: 10, display: 'flex', flexDirection: 'column', gap: 3, overflowY: 'auto' } },
-            TABS.map((t) => h('button', {
-              key: t.key, type: 'button', onClick: () => setTab(t.key),
-              style: {
-                ...S.btn(tab === t.key ? 'primary' : 'ghost'),
-                justifyContent: 'flex-start', display: 'flex', alignItems: 'center', gap: 8,
-                border: 'none', background: tab === t.key ? 'rgba(37,99,235,0.12)' : 'transparent',
-                color: tab === t.key ? T.accent : T.text, fontWeight: tab === t.key ? 650 : 500,
-              },
-            }, h('span', { style: { opacity: 0.7 } }, t.icon), t.label)),
+            WORKSPACES.map((ws) => h('div', { key: ws.key, style: { marginBottom: 8 } },
+              h('div', {
+                style: { ...S.muted, fontSize: 10, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', padding: '4px 8px 2px', opacity: 0.75 },
+                title: ws.hint,
+              }, ws.label),
+              ws.tabs.map((key) => {
+                const t = TABS.find((item) => item.key === key)
+                if (!t) return null
+                return h('button', {
+                  key: t.key, type: 'button', onClick: () => setTab(t.key),
+                  style: {
+                    ...S.btn(tab === t.key ? 'primary' : 'ghost'),
+                    justifyContent: 'flex-start', display: 'flex', alignItems: 'center', gap: 8,
+                    width: '100%', marginBottom: 2,
+                    border: 'none', background: tab === t.key ? 'rgba(37,99,235,0.12)' : 'transparent',
+                    color: tab === t.key ? T.accent : T.text, fontWeight: tab === t.key ? 650 : 500,
+                  },
+                }, h('span', { style: { opacity: 0.7 } }, t.icon), t.label)
+              }))),
             h('div', { style: { marginTop: 'auto', paddingTop: 10, ...S.muted, fontSize: 10.5, lineHeight: 1.5 } },
               '对话里让 Agent 调用 career_* 工具，面板会实时刷新。')),
           h('main', { style: { flex: 1, minWidth: 0, overflowY: 'auto', padding: 16 } },

@@ -65,19 +65,17 @@
 
 **未修**。计划：加 `company_capture` 完整性字段 + 解析响应里的 `count`，并在 UI 标注「本次只取到 10/6559」。
 
-### P1-5 岗位列表无分页，Client 一次拉 120 条
+### P1-5 岗位列表无分页 ✅ 本日已修（offset）
 
-`client/index.cjs:537` `limit=120`；`listJobs` 用 `LIMIT` 无 `OFFSET`。
-岗位池到几百条后会漏、会慢。
+Client 曾一次拉 120 条、`listJobs` 只有 `LIMIT` 没 `OFFSET`。**已加 `offset`**（repo + `/jobs` 路由），
+并补了「翻页不重复」的测试。
 
-**未修**。计划：加 `offset` + 虚拟列表。
+### ~~P1-6 FTS 没被使用~~ —— **本条审计有误，特此更正**
 
-### P1-6 FTS5 建了但岗位搜索没走它
+`repo/jobs.js` 的 `searchJobIds()` **已经走 FTS**：`db.ftsMode === 'trigram'` 且查询 ≥3 字时用
+`job_fts MATCH`，失败才回退 `LIKE`。我最初 grep 漏看了。**FTS 无需改动。**
 
-`job_fts`（trigram）存在，但 `repo/jobs.js` 的 `listJobs` 搜索走的是 `LIKE`（grep 无 `job_fts`/`MATCH` 命中）。
-中文 LIKE 在万级数据会慢。
-
-**未修**。计划：搜索走 FTS，`LIKE` 只做兜底。
+### P1-7 采集完整性未建模 ✅ 本日已修（schema v13）
 
 ### P2-7 `toCsv` 忽略 typeFilter
 
@@ -139,12 +137,12 @@
 
 | 阶段 | 内容 | 主要文件 | 风险 |
 | --- | --- | --- | --- |
-| **P0（已完成）** | 岗位/投递详情弹层、JD 自动补全、行内改状态 | `client/index.cjs`、`host/jd.js`、`host/routes.js`、`host/tools.js`、`host/schema.js` | 低（已过测试） |
-| **P1** | 5 工作区导航 + Dashboard 行动中心 + 设计 Token | `client/index.cjs`（先不拆分，降低风险） | 中：入口映射必须逐项核对，不能丢功能 |
-| **P2** | 采集完整性（total/observed/is_complete）+ 岗位分页 + FTS 搜索 | `host/repo/captures.js`、`host/repo/jobs.js`、`host/crawl.js`、`host/tools.js` | 中：schema 加字段需 v13 |
-| **P3** | 投递工作台：下一步任务、提醒去重、漏斗筛选 | `host/repo/applications.js`、`host/funnel.js`、`client` | 中：提醒去重需唯一键 |
-| **P4** | 简历工作台三栏 + 版本 Diff + 质量检查 | `host/tailor.js`、`host/latex.js`、`client` | 高：不编造事实的边界要守住 |
-| **P5** | 高层任务工作流 + 工具响应统一 + Client 拆分 | `host/tools.js`、`client/*` | 高：兼容性风险最大，放最后 |
+| **P0（已完成）** | 岗位/投递详情弹层、JD 自动补全、行内改状态 | `client/index.cjs`、`host/jd.js`、`host/routes.js`、`host/tools.js`、`host/schema.js` | 低 |
+| **P1（已完成）** | 5 工作区导航（11 页签全保留）+ Dashboard 行动入口 + 待核验/过期卡片 | `client/index.cjs` | 中 |
+| **P2（已完成）** | 采集完整性（reported_total/observed/is_complete, schema v13）+ 岗位分页 offset | `host/schema.js`、`host/repo/captures.js`、`host/repo/jobs.js`、`host/crawl.js`、`host/routes.js`、`host/tools.js` | 中 |
+| **P3（部分）** | 投递行内推进/快速记录已做；提醒去重、漏斗分时间范围未做 | `host/repo/applications.js`、`client` | 中 |
+| **P4（未开始）** | 简历三栏工作台 + 版本 Diff + 质量检查 | `host/tailor.js`、`host/latex.js`、`client` | 高：不编造事实的边界要守住 |
+| **P5（未开始）** | 高层任务工作流 + 工具响应统一 + Client 拆分 | `host/tools.js`、`client/*` | 高：兼容性风险最大 |
 
 **执行原则**：每阶段结束必须 183 个测试全绿 + 真实数据验证；不一次性拆掉现有结构。
 

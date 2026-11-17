@@ -474,9 +474,11 @@ export class JobRepo {
       params.push(...ids)
     }
 
+    const limit = Math.min(num(filter.limit) ?? 100, 500)
+    const offset = Math.max(num(filter.offset) ?? 0, 0)
     const sql = `SELECT * FROM job ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-                 ORDER BY coalesce(match_score, -1) DESC, updated_at DESC LIMIT ?`
-    const rows = this.db.all(sql, [...params, Math.min(num(filter.limit) ?? 100, 500)]).map(mapJob)
+                 ORDER BY coalesce(match_score, -1) DESC, updated_at DESC LIMIT ? OFFSET ?`
+    const rows = this.db.all(sql, [...params, limit, offset]).map(mapJob)
     return rows
   }
 
