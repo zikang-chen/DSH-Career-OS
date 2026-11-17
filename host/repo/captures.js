@@ -50,12 +50,43 @@ function identityOf(row) {
   return `tk:${normKey(row.companyKey ?? '')}|${normKey(row.title ?? '')}|${normKey(row.location ?? '')}`
 }
 
+/** 只有结构化 API 的总数与实际成功入库集合一致，且无截断/遗漏/失败，才能证明列表完整。 */
+export function assessCaptureCompleteness({ reportedTotal = null, extractedCount, batchCount, observedCount, failedCount = 0, parseWarnings = [], evidenceKind } = {}) {
+  const validCount = (value) => Number.isInteger(value) && value >= 0
+  const total = validCount(reportedTotal) ? reportedTotal : null
+  const warnings = [...(Array.isArray(parseWarnings) ? parseWarnings : [parseWarnings])].filter(Boolean).map(String)
+  const limitTruncated = validCount(extractedCount) && validCount(batchCount) && batchCount < extractedCount
+  if (limitTruncated) warnings.push(`limit 截断：解析 ${extractedCount} 条，仅处理 ${batchCount} 条。`)
+  if (failedCount > 0) warnings.push(`入库失败 ${failedCount} 条。`)
+  if (validCount(batchCount) && validCount(observedCount) && observedCount !== batchCount) warnings.push(`解析/入库有遗漏或合并：处理 ${batchCount} 条，成功记录 ${observedCount} 个不同岗位。`)
+  if (![extractedCount, batchCount, observedCount, failedCount].every(validCount)) warnings.push('缺少有效的解析/处理/成功入库计数。')
+  if (total !== null && validCount(observedCount) && observedCount !== total) warnings.push(`接口报共 ${total} 条，成功记录 ${observedCount} 条，数量不一致（可能未翻完分页或解析有遗漏）。`)
+  const reasons = [...warnings]
+  if (evidenceKind !== 'api-json') reasons.push('没有结构化 API 完整性证据；截图、列表文本或页面可见条数不能证明全量。')
+  if (total === null) reasons.push('接口没有返回有效总数，完整性未知。')
+  const isComplete = warnings.length ? false : evidenceKind === 'api-json' && total !== null ? true : null
+  const reason = reasons.join('；') || `结构化 API 报共 ${total} 条，全部成功记录，无截断、解析遗漏或入库失败。`
+  return { reportedTotal: total, observed: observedCount ?? null, extractedCount: extractedCount ?? null, batchCount: batchCount ?? null, failedCount, limitTruncated, evidenceKind: evidenceKind ?? null, isComplete, parseWarnings: [...new Set(warnings)], reason, note: reason }
+}
+
+function completenessBlocker(value, label) {
+  const state = typeof value === 'boolean' ? { isComplete: value } : value
+  if (!state || state.isComplete !== true) return `${label}完整性${state?.isComplete === false ? '未通过' : '未知'}${state?.reason ? `：${state.reason}` : ''}`
+  if (state.parseWarnings?.length || state.failedCount > 0 || state.limitTruncated === true) return `${label}仍有解析警告、入库失败或 limit 截断`
+  if (state.evidenceKind && state.evidenceKind !== 'api-json') return `${label}不是结构化 API 完整性证据（截图/列表文本不足）`
+  if (state.evidenceKind === 'api-json') {
+    const verified = assessCaptureCompleteness({ ...state, observedCount: state.observedCount ?? state.observed })
+    if (verified.isComplete !== true) return `${label}完整性证据不一致：${verified.reason}`
+  }
+  return null
+}
+
 /**
- * 两次抓取的集合差异。
- * @param {{previous:Array, current:Array}} input
- * @returns {{added:Array, removed:Array, unchanged:number, scopesComparable:boolean, caveat:string}}
+ * 两次抓取的集合差异。完整性参数必须显式为 true（或 isComplete:true 的校验结果），未知绝不判下架。
+ * @param {{previous:Array, current:Array, previousCompleteness?:object|boolean, currentCompleteness?:object|boolean}} input
+ * @returns {{added:Array, removed:Array, unchanged:number, scopesComparable:boolean, vanishedButNotClosed:Array, reason:string|null, caveat:string}}
  */
-export function diffCaptures({ previous = [], current = [], previousScopeKey, currentScopeKey } = {}) {
+export function diffCaptures({ previous = [], current = [], previousScopeKey, currentScopeKey, previousCompleteness, currentCompleteness } = {}) {
   const scopesComparable = (previousScopeKey ?? 'all') === (currentScopeKey ?? 'all')
   const before = new Map(previous.map((row) => [identityOf(row), row]))
   const after = new Map(current.map((row) => [identityOf(row), row]))
@@ -71,24 +102,23 @@ export function diffCaptures({ previous = [], current = [], previousScopeKey, cu
     if (!after.has(key)) removed.push(row)
   }
 
-  // 范围不同（比如上次只看「产品」这次看了全部）时，消失的岗位不能判定为下架。
-  if (!scopesComparable) {
-    return {
-      added,
-      removed: [],
-      unchanged,
-      scopesComparable: false,
-      vanishedButNotClosed: removed,
-      caveat: '两次抓取的筛选范围不同，消失的岗位不能判定为下架，只报新增。',
-    }
-  }
+  // 同范围仍可能只是第一页、limit 截断或解析/入库失败；前后两次都须有完整性证据。
+  const blockers = [
+    !scopesComparable ? '两次抓取的筛选范围不同' : null,
+    completenessBlocker(previousCompleteness, '上次抓取'),
+    completenessBlocker(currentCompleteness, '本次抓取'),
+  ].filter(Boolean)
+  const reason = blockers.length ? blockers.join('；') : null
   return {
     added,
-    removed,
+    removed: reason ? [] : removed,
     unchanged,
-    scopesComparable: true,
-    vanishedButNotClosed: [],
-    caveat: '范围一致，消失的岗位可视为已下架（仍建议以官网复核为准）。',
+    scopesComparable,
+    vanishedButNotClosed: reason ? removed : [],
+    reason,
+    caveat: reason
+      ? `${reason}，消失的岗位不能判定为下架；只记录本次未见，需官网复核。`
+      : '范围一致且前后两次均已证实完整、无解析遗漏/失败/截断，消失的岗位可视为已下架（仍建议以官网复核为准）。',
   }
 }
 
@@ -125,6 +155,10 @@ export class CaptureRepo {
   constructor(db, log) {
     this.db = db
     this.log = log
+  }
+
+  assessCompleteness(input) {
+    return assessCaptureCompleteness(input)
   }
 
   record(input) {
@@ -165,7 +199,13 @@ export class CaptureRepo {
       : 'SELECT * FROM company_capture WHERE company_key = ? ORDER BY captured_at DESC, rowid DESC LIMIT 1'
     const row = scopeKey ? this.db.get(sql, [companyKey, scopeKey]) : this.db.get(sql, [companyKey])
     if (!row) return null
-    return { ...row, stats: parseJson(row.stats, null), seenCodes: parseJson(row.seen_codes, null) }
+    return {
+      ...row,
+      stats: parseJson(row.stats, null),
+      seenCodes: parseJson(row.seen_codes, null),
+      parseWarnings: parseJson(row.parse_warnings, null),
+      isComplete: row.is_complete === null || row.is_complete === undefined ? null : Boolean(row.is_complete),
+    }
   }
 
   history(companyKey, limit = 20) {

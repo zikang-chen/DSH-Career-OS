@@ -59,15 +59,21 @@ export class IntelRepo {
     if (!platform) throw new Error('platform 必填')
     if (!content) throw new Error('需要内容或摘要（不要伪造未取得的内容）')
     const hash = sha1ish(`${platform}|${str(input.url, 1000) ?? ''}|${content}`)
-    const existing = this.db.get('SELECT * FROM forum_post WHERE platform = ? AND content_hash = ?', [platform, hash])
-    if (existing) return { ...existing, duplicate: true }
+    let identityUrl = null
+    try { const u=new URL(input.url); identityUrl=u.origin+u.pathname } catch { /* no URL */ }
+    const linked = identityUrl ? this.db.all('SELECT * FROM forum_post WHERE platform = ? AND url LIKE ?', [platform, identityUrl+'%']).find(row=>{try{const u=new URL(row.url);return u.origin+u.pathname===identityUrl}catch{return false}}) : null
+    const existing = linked ?? this.db.get('SELECT * FROM forum_post WHERE platform = ? AND content_hash = ?', [platform, hash])
+    if (existing) {
+      if(content.length > (existing.content_excerpt?.length??0)) this.db.run('UPDATE forum_post SET content_excerpt=?, content_hash=?, retrieved_at=? WHERE id=?',[content.slice(0,20000),hash,nowIso(),existing.id])
+      return { ...existing, duplicate: true }
+    }
     const at = nowIso()
     const id = uuid()
     const companyId = input.companyId ?? (input.company ? this.jobs.resolveCompany(input.company)?.id ?? null : null)
     let jobId = str(input.jobId, 60) ?? null
-    if (!jobId && input.jobTitle) {
-      const row = this.db.get('SELECT id FROM job WHERE title LIKE ? LIMIT 1', [`%${input.jobTitle}%`])
-      jobId = row?.id ?? null
+    if (!jobId && input.jobTitle && companyId) {
+      const matches = this.db.all('SELECT id FROM job WHERE title = ? AND company_id = ? LIMIT 2', [String(input.jobTitle),companyId])
+      jobId = matches.length === 1 ? matches[0].id : null
     }
     this.db.run(`INSERT INTO forum_post (id, platform, url, title, author_handle, published_at, retrieved_at, content_excerpt, content_hash, access_mode, company_id, job_id, license_note, created_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

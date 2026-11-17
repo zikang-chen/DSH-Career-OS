@@ -8,7 +8,7 @@ const TABS = [
   { key: 'tracker', label: '投递管理', icon: '☰' },
   { key: 'company', label: '公司情报', icon: '◉' },
   { key: 'industry', label: '行业研究', icon: '◎' },
-  { key: 'social', label: '论坛与 Bar', icon: '◔' },
+  { key: 'social', label: '知识库', icon: '◔' },
   { key: 'interview', label: '面试准备', icon: '◐' },
   { key: 'settings', label: '设置', icon: '⚙' },
 ]
@@ -19,8 +19,8 @@ const TABS = [
  */
 const WORKSPACES = [
   { key: 'home', label: '总览', hint: '今天做什么', tabs: ['overview', 'plan'] },
-  { key: 'opportunities', label: '机会', hint: '发现与比较岗位', tabs: ['radar', 'company', 'industry', 'social', 'interview'] },
-  { key: 'applications', label: '投递', hint: '推进与复盘', tabs: ['tracker'] },
+  { key: 'opportunities', label: '机会与情报', hint: '发现、核实与比较', tabs: ['radar', 'company', 'industry', 'social'] },
+  { key: 'applications', label: '投递与面试', hint: '推进、准备与复盘', tabs: ['tracker', 'interview'] },
   { key: 'resume', label: '简历', hint: '素材与出稿', tabs: ['resume', 'studio'] },
   { key: 'settings', label: '设置', hint: '数据源与系统', tabs: ['settings'] },
 ]

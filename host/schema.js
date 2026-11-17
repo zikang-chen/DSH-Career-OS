@@ -2,7 +2,7 @@
 // and is recorded in `schema_migrations`. Never edit an applied migration — append a
 // new one instead, so existing databases keep their history and user data.
 
-export const SCHEMA_VERSION = 13
+export const SCHEMA_VERSION = 14
 
 /**
  * @type {Array<{version:number,name:string,sql:string}>}
@@ -718,6 +718,52 @@ ALTER TABLE company_capture ADD COLUMN reported_total INTEGER;
 ALTER TABLE company_capture ADD COLUMN observed_count INTEGER;
 ALTER TABLE company_capture ADD COLUMN is_complete INTEGER;
 ALTER TABLE company_capture ADD COLUMN parse_warnings TEXT;
+`,
+  },
+  {
+    version: 14,
+    name: 'unified-knowledge-vault',
+    sql: `
+CREATE TABLE knowledge (
+  id TEXT PRIMARY KEY,
+  identity_key TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL CHECK (kind IN ('job','interview','announcement','salary','research')),
+  title TEXT NOT NULL,
+  company TEXT,
+  role TEXT,
+  platform TEXT NOT NULL,
+  url TEXT,
+  normalized_url TEXT,
+  identity_url TEXT,
+  published_at TEXT,
+  body TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'inbox' CHECK (status IN ('inbox','active','archived')),
+  evidence_level TEXT NOT NULL DEFAULT 'U',
+  completeness TEXT NOT NULL DEFAULT 'metadata',
+  media TEXT,
+  source_entity_type TEXT,
+  source_entity_id TEXT,
+  tags TEXT,
+  notes TEXT,
+  revision INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX idx_knowledge_kind_status ON knowledge(kind, status);
+CREATE INDEX idx_knowledge_company ON knowledge(company);
+CREATE INDEX idx_knowledge_platform ON knowledge(platform);
+CREATE INDEX idx_knowledge_source ON knowledge(source_entity_type, source_entity_id);
+CREATE TABLE knowledge_revision (
+  id TEXT PRIMARY KEY,
+  knowledge_id TEXT NOT NULL REFERENCES knowledge(id),
+  revision INTEGER NOT NULL,
+  body TEXT NOT NULL,
+  completeness TEXT NOT NULL,
+  url TEXT,
+  media TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE (knowledge_id, revision)
+);
 `,
   },
 ]

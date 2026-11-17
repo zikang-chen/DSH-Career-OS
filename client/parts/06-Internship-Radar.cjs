@@ -1,5 +1,5 @@
 // ─── Internship Radar ────────────────────────────────────────────────────────
-function RadarTab({ focusCode, onChanged }) {
+function RadarTab({ focusCode, onChanged, onNavigate }) {
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('')
   const [minScore, setMinScore] = useState('')
@@ -243,6 +243,8 @@ function RadarTab({ focusCode, onChanged }) {
                   style: { ...S.btn('primary'), textDecoration: 'none', display: 'inline-flex', alignItems: 'center' },
                 }, '去投递页')
                 : null,
+              h(Btn, { onClick: () => onNavigate?.('studio', detail.id) }, '按此岗位准备简历'),
+              h(Btn, { onClick: () => onNavigate?.('interview', detail.id) }, '按此JD准备面试'),
               h(Btn, { kind: 'primary', onClick: track }, detail.application ? '已在投递中' : '加入投递'))),
 
           // ② 基本信息（空值自动跳过，不显示成 —）

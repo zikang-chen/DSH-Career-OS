@@ -175,7 +175,7 @@ describe('submission proof', () => {
     assert.match(snapshot.note, /没有指定提交材料/)
   })
 
-  it('stores JD and snapshot on the application record', () => {
+  it('stores JD and a refreshable draft snapshot on a saved application record', () => {
     const env = makeEnv()
     try {
       const resume = env.repos.profile.addResume({ label: '产品版', rawText: '内容', sourceType: 'upload' })
@@ -187,6 +187,10 @@ describe('submission proof', () => {
       assert.equal(app.submittedJd.source, 'user')
       assert.equal(app.submittedJd.text, '原始 JD')
       assert.equal(app.submissionSnapshot.resumeVersionId, resume.id)
+      assert.equal(app.submissionSnapshot.state, 'draft')
+      assert.equal(app.submissionSnapshot.frozen, false)
+      assert.equal(app.submissionSnapshot.resume.rawText, '内容')
+      assert.match(app.submissionSnapshot.resume.rawTextHash, /^[a-f0-9]{64}$/)
       assert.equal(app.submissionSnapshot.materialsSpecified, true)
       assert.equal(app.submissionSnapshot.documents.length, 1)
       assert.equal(app.jd_url, 'https://example.com/jd')

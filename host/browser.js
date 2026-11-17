@@ -92,13 +92,13 @@ async function cdpVersion(port, timeoutMs = 1500) {
  * 启动（或复用）专用浏览器。
  * @returns {{ok:boolean, port:number|null, executable:string|null, profileDir:string, started:boolean, error?:string}}
  */
-export async function ensureBrowser({ dataDir, logger, extraArgs = [], noProxy = true } = {}) {
+export async function ensureBrowser({ dataDir, logger, extraArgs = [], noProxy = false } = {}) {
   const profileDir = browserProfileDir(dataDir)
   const previous = readBrowserState(dataDir)
   if (previous?.port) {
     const alive = await cdpVersion(previous.port)
     // 代理模式变了就得重启：正在跑的实例带着旧的网络设置。
-    const sameMode = (previous.noProxy ?? true) === noProxy
+    const sameMode = (previous.noProxy ?? false) === noProxy
     if (alive && sameMode) {
       return { ok: true, port: previous.port, executable: previous.executable ?? null, profileDir, started: false, note: '复用已运行的专用浏览器' }
     }
@@ -125,7 +125,7 @@ export async function ensureBrowser({ dataDir, logger, extraArgs = [], noProxy =
     '--no-default-browser-check',
     '--disable-features=Translate,msEdgeSidebarV2,msShoppingHub',
     '--window-size=1280,900',
-    // 校招站是境内站点，直连即可；跟着系统代理走反而可能被挡（实测 join.qq.com 直连通、走代理报错）。
+    // 默认遵循系统代理；仅显式 noProxy:true 才直连，不静默改用户的网络路线。
     ...(noProxy ? ['--no-proxy-server'] : []),
     ...extraArgs,
     'about:blank',
@@ -187,35 +187,43 @@ export class CdpConnection {
         const entry = this.pending.get(message.id)
         if (!entry) return
         this.pending.delete(message.id)
+        clearTimeout(entry.timer)
         if (message.error) entry.reject(new Error(`${entry.method}: ${message.error.message ?? 'CDP error'}`))
         else entry.resolve(message.result)
         return
       }
       for (const listener of this.listeners) listener(message)
     })
+    socket.addEventListener('close', () => this.rejectPending('CDP 连接已关闭'))
     return this
   }
 
-  send(method, params = {}, sessionId) {
-    const id = this.nextId
-    this.nextId += 1
+  send(method, params = {}, sessionId, timeoutMs = 8000) {
+    const id = this.nextId++
     const payload = { id, method, params }
     if (sessionId) payload.sessionId = sessionId
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method })
+      const timer = setTimeout(() => {
+        if (!this.pending.delete(id)) return
+        reject(new Error(`${method} 超时`))
+      }, timeoutMs)
+      this.pending.set(id, { resolve, reject, method, timer })
       try {
         this.socket.send(JSON.stringify(payload))
       } catch (err) {
         this.pending.delete(id)
+        clearTimeout(timer)
         reject(err)
       }
-      setTimeout(() => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id)
-          reject(new Error(`${method} 超时`))
-        }
-      }, 30000)
     })
+  }
+
+  rejectPending(reason) {
+    for (const entry of this.pending.values()) {
+      clearTimeout(entry.timer)
+      entry.reject(new Error(reason))
+    }
+    this.pending.clear()
   }
 
   on(listener) {
@@ -224,9 +232,8 @@ export class CdpConnection {
   }
 
   close() {
-    try {
-      this.socket?.close()
-    } catch { /* ignore */ }
+    this.rejectPending('CDP 连接已关闭')
+    try { this.socket?.close() } catch { /* ignore */ }
   }
 }
 
@@ -251,6 +258,11 @@ export function rankResponseCandidate({ url = '', mimeType = '', size = 0 }, pat
     score -= 40
     reasons.push('配置类降权')
   }
+  // 噪声接口：搜索历史同步、版本号、i18n 翻译、SEO 列表——都不是目标数据
+  if (/(sync-search-his|version\.json|translation|seoapi|batch-dictionary|dd_city|dd_industry)/.test(lower)) {
+    score -= 60
+    reasons.push('噪声接口降权')
+  }
   if (size > 2000) { score += 5; reasons.push('体积较大') }
   if (size > 60000) { score -= 3; reasons.push('体积过大') }
   // encodedDataLength 在压缩响应上并不可靠（腾讯 10 条岗位只报 73 字节），
@@ -264,6 +276,75 @@ function isNetworkUrl(url) {
   return /^https?:/i.test(String(url ?? ''))
 }
 
+/** 仅输出安全 URL，绝不把会话票据写进工具日志或健康记录。 */
+export function publicBrowserUrl(value) {
+  try {
+    const u = new URL(value)
+    for (const key of [...u.searchParams.keys()]) {
+      if (/token|cookie|security|session|lid|uuid|sign|timestamp|api_key|req|decode__|accountid/i.test(key)) u.searchParams.delete(key)
+    }
+    return u.toString()
+  } catch { return '' }
+}
+
+/** loadingFinished 时立即缓存响应，避免等页面加载完才取体时 requestId 已回收。 */
+export function watchJsonResponses(cdp, sessionId, { patterns = [], prefer, validateJson } = {}) {
+  const responses = new Map()
+  const score = (candidate) => {
+    const ranked = rankResponseCandidate(candidate, patterns)
+    if (prefer && new RegExp(prefer, 'i').test(candidate.url)) {
+      ranked.score += 45
+      ranked.reason += ',站点优先'
+    }
+    return ranked
+  }
+  let active = true
+  const off = cdp.on((message) => {
+    if (!active || message.sessionId !== sessionId) return
+    const p = message.params ?? {}
+    if (message.method === 'Network.responseReceived') {
+      const r = p.response ?? {}
+      if (!isNetworkUrl(r.url) || responses.size > 250) return
+      const item = { requestId: p.requestId, url: r.url, mimeType: r.mimeType ?? '', status: r.status, size: r.encodedDataLength ?? 0, order: responses.size }
+      Object.assign(item, score(item))
+      if (item.score >= 35 && /json/i.test(item.mimeType)) responses.set(p.requestId, item)
+    } else if (message.method === 'Network.loadingFinished') {
+      const item = responses.get(p.requestId)
+      if (!item || item.pending) return
+      item.size = p.encodedDataLength ?? item.size
+      item.pending = cdp.send('Network.getResponseBody', { requestId: p.requestId }, sessionId, 3500).then((body) => {
+        const text = body.base64Encoded ? Buffer.from(body.body, 'base64').toString('utf8') : body.body
+        if (!text || text.length > 8 * 1024 * 1024) throw new Error('响应为空或超过 8MB 上限')
+        item.json = JSON.parse(text)
+        item.bytes = Buffer.byteLength(text, 'utf8')
+        item.valid = item.status >= 200 && item.status < 300 && (validateJson ? Boolean(validateJson(item.json, item.url)) : item.json !== null && typeof item.json === 'object')
+      }).catch((err) => { item.error = String(err.message); item.valid = false })
+    } else if (message.method === 'Network.loadingFailed') {
+      const item = responses.get(p.requestId)
+      if (item) item.error = p.errorText ?? '网络加载失败'
+    }
+  })
+  return {
+    responses,
+    best: () => [...responses.values()].filter((r) => r.valid).sort((a, b) => b.score - a.score || b.order - a.order)[0] ?? null,
+    candidates: () => [...responses.values()].sort((a, b) => b.score - a.score || b.order - a.order).slice(0, 12).map((r) => ({
+      url: publicBrowserUrl(r.url), status: r.status, score: r.score, bytes: r.bytes ?? 0,
+      accepted: r.valid === true, error: r.error ?? null,
+    })),
+    dispose: () => { active = false; off() },
+  }
+}
+
+async function pageSummary(cdp, sessionId) {
+  try {
+    const r = await cdp.send('Runtime.evaluate', {
+      expression: 'JSON.stringify({url:location.href,title:document.title,text:(document.body?.innerText||" ").slice(0,1200)})', returnByValue: true,
+    }, sessionId, 2500)
+    const page = JSON.parse(r.result?.value ?? '{}')
+    return { url: publicBrowserUrl(page.url), title: page.title ?? '', text: page.text ?? '' }
+  } catch { return { url: '', title: '', text: '' } }
+}
+
 /**
  * 打开一个页面，捕获它自己发出的 JSON 响应，挑最像岗位列表的那个返回。
  *
@@ -274,7 +355,7 @@ function isNetworkUrl(url) {
  */
 export async function capturePageJson({
   dataDir, url, matchUrl, patterns = ['job', 'post', 'position', 'search', 'campus', 'recruit'],
-  timeoutMs = 25000, logger,
+  prefer = null, validateJson, search, timeoutMs = 25000, logger,
 } = {}) {
   const browser = await ensureBrowser({ dataDir, logger })
   if (!browser.ok) return { ok: false, error: browser.error, browser }
@@ -284,10 +365,11 @@ export async function capturePageJson({
   if (!wsUrl) return { ok: false, error: '拿不到 CDP WebSocket 地址', browser }
 
   const cdp = await new CdpConnection(wsUrl).connect()
+  let targetId = null
+  let attached = null
+  let reusedTab = false
+  let watcher = null
   try {
-    let targetId = null
-    let attached = null
-    let reusedTab = false
 
     // 优先复用用户已经打开的标签页
     if (matchUrl) {
@@ -321,67 +403,91 @@ export async function capturePageJson({
     }
 
     const sessionId = attached.sessionId
-    const responses = new Map()
-    const off = cdp.on((message) => {
-      if (message.sessionId !== sessionId) return
-      if (message.method !== 'Network.responseReceived') return
-      const { requestId, response } = message.params
-      if (!isNetworkUrl(response.url)) return
-      responses.set(requestId, {
-        requestId,
-        url: response.url,
-        mimeType: response.mimeType ?? '',
-        status: response.status,
-        size: Number(response.encodedDataLength ?? 0),
-      })
-    })
-
-    await cdp.send('Network.enable', {}, sessionId)
+    watcher = watchJsonResponses(cdp, sessionId, { patterns, prefer, validateJson })
+    await cdp.send('Network.enable', { maxTotalBufferSize: 16000000, maxResourceBufferSize: 8000000 }, sessionId)
     await cdp.send('Page.enable', {}, sessionId)
-    // 复用时不能导航（用户可能在登录流程里），只重载当前页让 XHR 重新发一遍
     if (reusedTab) await cdp.send('Page.reload', { ignoreCache: true }, sessionId)
     else await cdp.send('Page.navigate', { url }, sessionId)
 
+    // 部分SPA（51job/OfferShow）忽略URL参数，需要操作页面本身的搜索框。
+    // 只填写已核实的搜索输入并按Enter；不操作投递、联系人、验证码或付费入口。
+    if (search?.selector && search.keyword) {
+      let ready = false
+      const searchStarted = Date.now()
+      for (let i = 0; i < 32 && Date.now() - searchStarted < 12000; i++) {
+        await sleep(350)
+        const r = await cdp.send('Runtime.evaluate', {expression:`Boolean(document.querySelector(${JSON.stringify(search.selector)}))`,returnByValue:true},sessionId,2000).catch(()=>null)
+        if (r?.result?.value) {ready=true;break}
+      }
+      if (!ready) throw new Error('搜索输入框未出现（可能需要登录/验证）')
+      await sleep(500)
+      await cdp.send('Runtime.evaluate', {expression:`(()=>{const n=document.querySelector(${JSON.stringify(search.selector)});const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;setter.call(n,${JSON.stringify(search.keyword)});n.dispatchEvent(new Event('input',{bubbles:true}));n.dispatchEvent(new Event('change',{bubbles:true}));n.focus()})()`},sessionId,2000)
+      watcher.responses.clear()
+      await cdp.send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'},sessionId,2000)
+      await cdp.send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13},sessionId,2000)
+    }
+
     const started = Date.now()
-    let best = null
-    while (Date.now() - started < timeoutMs) {
-      await sleep(600)
-      for (const candidate of responses.values()) {
-        const ranked = rankResponseCandidate(candidate, patterns)
-        if (ranked.score >= 35 && (!best || ranked.score > best.ranked.score)) {
-          best = { ...candidate, ranked }
-        }
-      }
-      if (best && Date.now() - started > 5000) break
+    const budget = Math.max(4000, Math.min(Number(timeoutMs) || 25000, 60000))
+    while (Date.now() - started < budget) {
+      await sleep(250)
+      const best = watcher.best()
+      // 没拿到真正的数据不能因一个配置/登录响应就提前成功。
+      if (best && Date.now() - started >= 4000 && (!prefer || new RegExp(prefer, 'i').test(best.url))) break
     }
-    off()
-
-    const candidates = [...responses.values()]
-      .map((candidate) => ({ ...candidate, ...rankResponseCandidate(candidate, patterns) }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 12)
-      .map(({ requestId, url: responseUrl, status, mimeType, size, score, reason }) => ({ requestId, url: responseUrl, status, mimeType, size, score, reason }))
-
+    const best = watcher.best()
+    const page = await pageSummary(cdp, sessionId)
+    const candidates = watcher.candidates()
     if (!best) {
-      if (!reusedTab) await cdp.send('Target.closeTarget', { targetId }).catch(() => {})
-      return { ok: false, error: '页面没有发出像「岗位列表」的 JSON 请求', candidates, reusedTab, browser }
+      const login = /\/web\/user\/|\/login(?:[/?#]|$)|passport/i.test(page.url)
+      const challenge = /安全验证|访问过于频繁|滑块验证|验证码|访问受限/.test(page.text)
+      return { ok: false, stage: login ? 'login_required' : challenge ? 'challenge' : 'capture',
+        error: login ? '页面跳转到登录页，登录态可能已失效' : challenge ? '站点要求验证或限制访问，请在专用浏览器里人工处理' : '本次没有取到可解析的目标数据（不是把任意 JSON 当成功）',
+        page: { url: page.url, title: page.title }, candidates, reusedTab, browser }
     }
-
-    const body = await cdp.send('Network.getResponseBody', { requestId: best.requestId }, sessionId)
-    let json = null
-    try {
-      json = JSON.parse(body?.body ?? '')
-    } catch {
-      try {
-        json = JSON.parse(Buffer.from(body?.body ?? '', 'base64').toString('utf8'))
-      } catch {
-        json = null
-      }
-    }
-    if (!reusedTab) await cdp.send('Target.closeTarget', { targetId }).catch(() => {})
-    if (json === null) return { ok: false, error: '响应体不是 JSON（可能被压缩或需要二次请求）', candidates, reusedTab, browser }
-    return { ok: true, captured: { url: best.url, status: best.status, bytes: String(body?.body ?? '').length, json }, candidates, reusedTab, browser }
+    return { ok: true, captured: { url: publicBrowserUrl(best.url), status: best.status, bytes: best.bytes, json: best.json },
+      page: { url: page.url, title: page.title }, candidates, reusedTab, browser }
+  } catch (err) {
+    return { ok: false, stage: 'browser', error: String(err.message), candidates: watcher?.candidates() ?? [], reusedTab, browser }
   } finally {
+    watcher?.dispose()
+    if (targetId && !reusedTab) await cdp.send('Target.closeTarget', { targetId }, undefined, 1500).catch(() => {})
+    if (reusedTab && attached?.sessionId) await cdp.send('Target.detachFromTarget', { sessionId: attached.sessionId }, undefined, 1500).catch(() => {})
+    cdp.close()
+  }
+}
+
+/** 读一个页面的渲染后正文（用于详情页是服务端渲染、接口抓不到的情况）。 */
+export async function capturePageText({ dataDir, url, selectors = [], timeoutMs = 18000, logger } = {}) {
+  const browser = await ensureBrowser({ dataDir, logger })
+  if (!browser.ok) return { ok: false, error: browser.error }
+  const info = await cdpVersion(browser.port)
+  if (!info?.webSocketDebuggerUrl) return { ok: false, error: '拿不到 CDP WebSocket 地址' }
+  const cdp = await new CdpConnection(info.webSocketDebuggerUrl).connect()
+  let targetId
+  try {
+    ;({ targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' }))
+    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true })
+    await cdp.send('Page.enable', {}, sessionId)
+    await cdp.send('Page.navigate', { url }, sessionId)
+    const expression = `JSON.stringify({url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,40000),sections:${JSON.stringify(selectors)}.map(selector=>({selector,text:Array.from(document.querySelectorAll(selector)).map(n=>n.innerText).join('\\n').slice(0,30000)})),links:Array.from(document.querySelectorAll('a[href]')).slice(0,120).map(a=>({text:(a.innerText||'').trim().slice(0,80),url:a.href})),images:Array.from(document.querySelectorAll('.note-slider-img img')).map(n=>({url:n.currentSrc||n.src,width:n.naturalWidth,height:n.naturalHeight})).filter(n=>n.width>250&&n.height>200).slice(0,30)})`
+    const started = Date.now()
+    let page = null
+    while (Date.now() - started < Math.max(4000, Math.min(timeoutMs || 18000, 45000))) {
+      await sleep(650)
+      const r = await cdp.send('Runtime.evaluate', { expression, returnByValue: true }, sessionId, 3000).catch(() => null)
+      if (!r?.result?.value) continue
+      page = JSON.parse(r.result.value)
+      if (Date.now() - started < 4000) continue
+      if (page.sections.some(s => s.text.length > 60) || !selectors.length && page.text.length > 100) break
+      if (/\/login|\/web\/user\//i.test(page.url) || /访问受限|安全验证|页面不存在/.test(page.title)) break
+    }
+    if (!page) return { ok: false, error: '页面正文读取超时', url: publicBrowserUrl(url) }
+    return { ok: Boolean(page.text.trim()), ...page, url: publicBrowserUrl(page.url), links: page.links.map(l => ({...l, url:publicBrowserUrl(l.url)})) }
+  } catch (err) {
+    return { ok: false, error: String(err.message), url: publicBrowserUrl(url) }
+  } finally {
+    if (targetId) await cdp.send('Target.closeTarget', { targetId }, undefined, 1500).catch(() => {})
     cdp.close()
   }
 }

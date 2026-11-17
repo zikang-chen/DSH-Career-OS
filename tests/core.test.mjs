@@ -395,7 +395,8 @@ describe('application CRM', () => {
       assert.equal(updated.status, 'applied')
       assert.ok(updated.applied_at, 'applied date is stamped automatically')
       const events = updated.events
-      assert.equal(events.length, 2)
+      assert.equal(events.filter((e) => e.type === 'status').length, 2)
+      assert.equal(events.filter((e) => e.type === 'submission_frozen').length, 1)
       assert.ok(events.some((e) => e.from_status === 'ready' && e.to_status === 'applied'))
       const reloaded = env.repos.applications.get(app.id)
       assert.equal(reloaded.status, 'applied', 'survives a fresh read from SQLite')

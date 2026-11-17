@@ -156,7 +156,10 @@ export class JobRepo {
     if (identity) {
       const existing = this.db.get('SELECT * FROM job WHERE id = ?', [identity.id])      // Merge only fields the incoming record actually provides.
       const updates = {}
+      const protectsOfficial = opts.official !== true && Boolean(this.db.scalar("SELECT count(*) FROM job_source WHERE job_id = ? AND source_type = 'official_careers'", [identity.id]))
       const assign = (col, value) => {
+        // 第三方可以补官方记录的空字段，但不能替换官方正文/投递地址等已有事实。
+        if (protectsOfficial && existing[col] !== null && existing[col] !== undefined && String(existing[col]).trim() !== '') return
         if (value !== null && value !== undefined && value !== '' && value !== existing[col]) updates[col] = value
       }
       assign('job_code', job.jobCode)
@@ -179,7 +182,7 @@ export class JobRepo {
       assign('deadline', job.deadline)
       assign('recruit_type', job.recruitType)
       assign('apply_url', job.applyUrl)
-      if (job.skills.length) updates.skills = [...new Set([...parseJson(existing.skills, []), ...job.skills])]
+      if (job.skills.length && (!protectsOfficial || !parseJson(existing.skills, []).length)) updates.skills = [...new Set([...parseJson(existing.skills, []), ...job.skills])]
       if (job.conversionPossible !== null) assign('conversion_possible', job.conversionPossible)
       if (Object.keys(updates).length) {
         this.db.run(`UPDATE job SET ${Object.keys(updates).map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ?`,
@@ -377,7 +380,7 @@ export class JobRepo {
     const sources = this.db.all('SELECT * FROM job_source WHERE job_id = ? ORDER BY retrieved_at DESC', [id])
     const history = this.db.all('SELECT * FROM job_status_history WHERE job_id = ? ORDER BY verified_at DESC', [id])
     const notes = this.db.all('SELECT * FROM job_note WHERE job_id = ? ORDER BY created_at DESC', [id])
-    const requirements = this.db.all('SELECT * FROM hiring_requirement WHERE job_id = ? ORDER BY kind, created_at', [id])
+    const hiringRequirements = this.db.all('SELECT * FROM hiring_requirement WHERE job_id = ? ORDER BY kind, created_at', [id])
     const interviews = this.db.all('SELECT * FROM interview_experience WHERE job_id = ? ORDER BY year DESC', [id])
     const company = job.company_id ? this.mapCompany(this.db.get('SELECT * FROM company WHERE id = ?', [job.company_id])) : null
     const match = this.db.get('SELECT * FROM match_result WHERE job_id = ? ORDER BY created_at DESC LIMIT 1', [id])
@@ -387,7 +390,7 @@ export class JobRepo {
       sources,
       history,
       notes,
-      requirements,
+      hiringRequirements,
       interviews,
       company,
       match: match ? { ...match, breakdown: parseJson(match.breakdown, {}), reasons: parseJson(match.reasons, {}) } : null,

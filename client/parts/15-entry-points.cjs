@@ -37,7 +37,7 @@ function SettingsCard() {
   return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, padding: 8, fontSize: 13, color: T.text } },
     h('h3', { style: { margin: 0 } }, 'CareerOS'),
     h('p', { style: { margin: 0, ...S.muted } }, '个人求职情报与实习管理系统：简历与画像、岗位雷达、可解释匹配、投递 CRM、公司与行业研究、论坛情报、面试准备与监控提醒。'),
-    h('p', { style: { margin: 0, ...S.muted } }, '所有数据保存在本机 SQLite；不会自动投递简历或对外发信。第三方招聘平台与论坛受登录与反爬限制，系统只提供手动导入与搜索入口。'))
+    h('p', { style: { margin: 0, ...S.muted } }, '所有数据保存在本机 SQLite；不会自动投递简历或对外发信。支持专用浏览器登录与低频采集；来源、JD、图片待识别与采集失败会明确区分，不绕过登录或会员限制。'))
 }
 
 const name = 'dsh-career-client'

@@ -17,8 +17,8 @@ const KIND_OPTIONS = [
   ['certificate', '证书'], ['skill', '技能'],
 ]
 
-function StudioTab({ onChanged }) {
-  const [view, setView] = useState('upload')
+function StudioTab({ onChanged, focusCode }) {
+  const [view, setView] = useState(focusCode ? 'tailor' : 'upload')
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null)
 
@@ -31,7 +31,8 @@ function StudioTab({ onChanged }) {
 
   // tailor
   const [jobs, setJobs] = useState([])
-  const [tailorJobId, setTailorJobId] = useState('')
+  const [tailorJobId, setTailorJobId] = useState(focusCode || '')
+  useEffect(() => { if (focusCode) { setTailorJobId(focusCode); setView('tailor') } }, [focusCode])
   const [tailorPlan, setTailorPlan] = useState(null)
   const [tailoring, setTailoring] = useState(false)
 
@@ -544,7 +545,7 @@ function Panel({ onClose }) {
           /* ignore malformed frames */
         }
       })
-      for (const kind of ['jobs', 'applications', 'resume', 'profile', 'monitor', 'company', 'social', 'reports']) {
+      for (const kind of ['jobs', 'applications', 'resume', 'profile', 'monitor', 'company', 'social', 'reports', 'sources', 'knowledge']) {
         source.addEventListener(kind, () => bump())
       }
     } catch {
@@ -559,18 +560,19 @@ function Panel({ onClose }) {
     }
   }, [bump])
 
+  const navigate = (next, code = null) => { setTab(next); setFocusCode(code); setFocusNote(code ? '已带入所选岗位，无需重复填写 JD。' : null) }
   const data = bootstrap.data
   const content = () => {
     switch (tab) {
       case 'plan': return h(PlanTab, { onChanged: bump })
-      case 'studio': return h(StudioTab, { onChanged: bump })
+      case 'studio': return h(StudioTab, { onChanged: bump, focusCode })
       case 'resume': return h(ResumeTab, { bootstrap: data, onChanged: bump })
-      case 'radar': return h(RadarTab, { focusCode, onChanged: bump })
+      case 'radar': return h(RadarTab, { focusCode, onChanged: bump, onNavigate: navigate })
       case 'tracker': return h(TrackerTab, { bootstrap: data, onChanged: bump })
       case 'company': return h(CompanyTab)
       case 'industry': return h(IndustryTab)
-      case 'social': return h(SocialTab)
-      case 'interview': return h(InterviewTab)
+      case 'social': return h(SocialTab, { onNavigate: navigate })
+      case 'interview': return h(InterviewTab, { focusCode })
       case 'settings': return h(SettingsTab, { bootstrap: data, onChanged: bump })
       default: return h(OverviewTab, { bootstrap: data, onNavigate: setTab, onRefresh: bump })
     }

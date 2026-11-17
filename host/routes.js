@@ -16,8 +16,11 @@ import { DOC_LABEL, proposeDocument } from './documents.js'
 import { buildApplyCard, renderApplyCardText } from './applycard.js'
 import { checkResumeQuality } from './quality.js'
 import { buildInterviewPlan } from './interview.js'
-import { SITE_PROFILES, getSiteProfile } from './sites.js'
-import { capturePageJson } from './browser.js'
+import { SITE_PROFILES, getSiteProfile, loginUrlForConnector } from './sites.js'
+import { captureSite, sourceHealthRows } from './site-capture.js'
+import {processKnowledgeOcr,ocrStatus} from './ocr.js'
+import {syncKnowledgeIndex} from './knowledge-sync.js'
+import { capturePageJson, openForLogin } from './browser.js'
 import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
 import { parsePastedJob } from './sources.js'
@@ -109,7 +112,7 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
       skills: repos.profile.listSkills(),
       digest: monitor.buildDigest(),
       board: repos.applications.board(),
-      sources: repos.monitor.listSources(),
+      sources: sourceHealthRows(repos),
       rules: repos.monitor.listRules(),
       runs: repos.monitor.listRuns(15),
       notifications: repos.monitor.listNotifications({ limit: 30 }),
@@ -278,41 +281,25 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
     })
   })
 
+  route('GET', '/knowledge', ({query}) => ({ok:true,...repos.knowledge.list({query:query.get('query')||undefined,kind:query.get('kind')||undefined,company:query.get('company')||undefined,platform:query.get('platform')||undefined,status:query.get('status')||undefined,offset:Number(query.get('offset')||0),limit:Number(query.get('limit')||20)}),stats:repos.knowledge.stats()}))
+  route('POST', '/knowledge/sync', () => ({ok:true,...syncKnowledgeIndex(repos)}))
+  route('GET', '/knowledge/item', ({query}) => {const item=repos.knowledge.get(query.get('id'));if(!item)throw new HttpError('资料不存在',404);return {ok:true,item}})
+  route('POST', '/knowledge/update', ({body}) => ({ok:true,item:repos.knowledge.update(String(body.id),Object.fromEntries(Object.entries(body).filter(([k])=>k!=='id')))}))
+  route('GET', '/knowledge/ocr/status', () => ocrStatus({dataDir:config.dataDir}))
+  route('POST', '/knowledge/ocr', ({body}) => processKnowledgeOcr(body,{repos,config}))
+
   route('GET', '/sites', () => ({ ok: true, sites: Object.values(SITE_PROFILES).map((s) => ({ key: s.key, label: s.label, kind: s.kind, loginUrl: s.loginUrl, note: s.note })) }))
 
-  route('POST', '/site/capture', async ({ body }) => {
-    const profile = getSiteProfile(body.site)
-    if (!profile) throw new HttpError('未知站点')
-    const keyword = str(body.keyword, 100)
-    const targetUrl = str(body.url, 2000) ?? (keyword ? profile.searchUrl({ keyword, city: str(body.city, 60) ?? undefined }) : null)
-    if (!targetUrl) throw new HttpError('需要 keyword 或 url')
-    const captured = await capturePageJson({
-      dataDir: config.dataDir, url: targetUrl,
-      matchUrl: body.useOpenTab === true ? targetUrl : undefined,
-      patterns: profile.patterns, timeoutMs: Math.min(Number(body.timeoutMs ?? 25000), 60000), logger,
-    })
-    if (!captured.ok) return { ok: false, stage: 'capture', error: captured.error, candidates: captured.candidates ?? [], loginUrl: profile.loginUrl }
-    const items = profile.parse(captured.captured.json) || []
-    if (!items.length) return { ok: false, stage: 'parse', responseShape: describeJsonShape(captured.captured.json), candidates: captured.candidates }
-    const limited = items.slice(0, Math.min(Number(body.limit ?? 30), 200))
-    if (body.dryRun !== false) return { ok: true, dryRun: true, site: profile.key, found: items.length, preview: limited.slice(0, 20) }
-    if (profile.kind === 'job') {
-      const imported = repos.jobs.importPostings(limited.map((it) => ({
-        company: it.company, title: it.title, location: it.location, salaryText: it.salaryText, jobCode: it.jobCode, url: it.url, applyUrl: it.url,
-      })), { pageUrl: captured.captured.url, official: false, sourceName: `${profile.label}（CDP 采集，未核验）` })
-      panel.publish({ kind: 'jobs' })
-      return { ok: true, dryRun: false, created: imported.created.length, merged: imported.merged.length }
-    }
-    let saved = 0
-    let duplicate = 0
-    for (const it of limited) {
-      const content = [it.title, it.desc].filter(Boolean).join('\n\n')
-      if (!content) continue
-      const post = repos.intel.addForumPost({ platform: 'xiaohongshu', content, url: it.url, title: it.title, author: it.author, publishedAt: it.publishedAt ?? undefined, accessMode: 'public_page' })
-      if (post.duplicate) duplicate += 1; else saved += 1
-    }
-    return { ok: true, dryRun: false, saved, duplicate }
+  // 数据源设置里「双击/点登录」：打开专用浏览器登录页，登录态持久化在 data/browser-profile
+  route('POST', '/sources/login', async ({ body }) => {
+    const connector = str(body.connector, 40)
+    const url = str(body.url, 2000) ?? loginUrlForConnector(connector) ?? (getSiteProfile(connector)?.loginUrl) ?? null
+    if (!url) throw new HttpError('这个数据源没有可登录的网页入口（或尚未登记）', 400)
+    const result = await openForLogin({ dataDir: config.dataDir, url, logger })
+    return { ok: result.ok, connector, url, ...result, note: result.ok ? `已打开 ${url}。登录资料保存在本机专用浏览器，重启会保留；是否仍有效由站点决定，失效时请重新登录。` : result.error }
   })
+
+  route('POST', '/site/capture', ({ body }) => captureSite(body, { config, repos, panel, logger }))
 
   route('GET', '/monitor/rules', () => ({ ok: true, rules: repos.monitor.listRules() }))
   route('GET', '/monitor/runs', ({ query }) => ({ ok: true, runs: repos.monitor.listRuns(Number(query.get('limit') ?? 30)) }))
@@ -321,7 +308,7 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
     notifications: repos.monitor.listNotifications({ unreadOnly: query.get('unread') === '1', limit: Number(query.get('limit') ?? 50) }),
     unread: repos.monitor.unreadCount(),
   }))
-  route('GET', '/sources', () => ({ ok: true, sources: repos.monitor.listSources() }))
+  route('GET', '/sources', () => ({ ok: true, sources: sourceHealthRows(repos) }))
   route('GET', '/client-health', () => ({
     ok: true,
     client: typeof clientHealth === 'function' ? clientHealth() : { available: false, reason: 'not wired' },
@@ -545,6 +532,7 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
 
   route('POST', '/social/import', async ({ body }) => {
     const post = repos.intel.addForumPost(body)
+    repos.knowledge.upsert({kind:'interview',title:body.title??'手动导入面经',company:body.company,role:body.jobTitle,platform:body.platform,url:body.url,body:body.content,completeness:'full',evidenceLevel:'C',sourceEntityType:'forum_post',sourceEntityId:post.id})
     if (post.duplicate) return { ok: true, duplicate: true, postId: post.id }
     const claims = Array.isArray(body.claims) ? body.claims.map((c) => repos.intel.addClaim({ ...c, postId: post.id, companyId: post.company_id, jobId: post.job_id })) : []
     const interview = body.interview ? repos.intel.addInterview({ ...body.interview, postId: post.id, url: body.url, companyId: post.company_id, jobId: post.job_id }) : null

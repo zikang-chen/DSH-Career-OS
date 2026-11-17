@@ -82,6 +82,8 @@ describe('capture diff', () => {
       current: [row('2', '运营实习生', '上海'), row('3', '算法实习生', '北京')],
       previousScopeKey: 'all',
       currentScopeKey: 'all',
+      previousCompleteness: true,
+      currentCompleteness: true,
     })
     assert.equal(diff.added.length, 1)
     assert.equal(diff.added[0].title, '算法实习生')
@@ -97,11 +99,60 @@ describe('capture diff', () => {
       current: [row('1', '产品实习生', '北京')],
       previousScopeKey: 'all',
       currentScopeKey: 'city=北京',
+      previousCompleteness: true,
+      currentCompleteness: true,
     })
     assert.equal(diff.scopesComparable, false)
     assert.equal(diff.removed.length, 0, 'narrower scope must not mark jobs as removed')
     assert.equal(diff.vanishedButNotClosed.length, 1)
     assert.match(diff.caveat, /范围不同/)
+  })
+
+  it('keeps vanished jobs unclosed when completeness is unknown by default', () => {
+    const diff = diffCaptures({
+      previous: [row('1', '产品实习生', '北京'), row('2', '运营实习生', '上海')],
+      current: [row('2', '运营实习生', '上海'), row('3', '算法实习生', '北京')],
+      previousScopeKey: 'all', currentScopeKey: 'all',
+    })
+    assert.equal(diff.scopesComparable, true)
+    assert.equal(diff.added.length, 1, 'incomplete runs can still report observed additions')
+    assert.equal(diff.unchanged, 1)
+    assert.deepEqual(diff.removed, [])
+    assert.equal(diff.vanishedButNotClosed[0].jobCode, '1')
+    assert.match(diff.reason, /上次抓取完整性未知/)
+    assert.match(diff.reason, /本次抓取完整性未知/)
+  })
+
+  it('requires both the previous and current capture to be proven complete', () => {
+    for (const [previousCompleteness, currentCompleteness] of [[null, true], [true, null], [false, true], [true, false]]) {
+      const diff = diffCaptures({
+        previous: [row('1', '产品实习生', '北京')], current: [],
+        previousCompleteness, currentCompleteness,
+      })
+      assert.equal(diff.removed.length, 0)
+      assert.equal(diff.vanishedButNotClosed.length, 1)
+      assert.ok(diff.reason)
+    }
+  })
+
+  it('does not trust a complete flag contradicted by parser warnings, failures or truncation', () => {
+    for (const issue of [
+      { parseWarnings: ['一条岗位无法解析'] }, { failedCount: 1 }, { limitTruncated: true },
+      { evidenceKind: 'screenshot' }, { evidenceKind: 'list-text' },
+      { evidenceKind: 'api-json', reportedTotal: 2, extractedCount: 2, batchCount: 1, observed: 1 },
+      { evidenceKind: 'api-json', reportedTotal: null, extractedCount: 1, batchCount: 1, observed: 1 },
+    ]) {
+      for (const side of ['previousCompleteness', 'currentCompleteness']) {
+        const diff = diffCaptures({
+          previous: [row('1', '产品实习生', '北京')], current: [],
+          previousCompleteness: true, currentCompleteness: true,
+          [side]: { isComplete: true, ...issue },
+        })
+        assert.equal(diff.removed.length, 0)
+        assert.equal(diff.vanishedButNotClosed.length, 1)
+        assert.ok(diff.reason)
+      }
+    }
   })
 
   it('identifies a job by code when present, by title+location otherwise', () => {

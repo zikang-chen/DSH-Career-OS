@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { CareerDb } from './db.js'
 import { runBackup } from './backup.js'
 import { Repos } from './repo/index.js'
+import {syncKnowledgeIndex} from './knowledge-sync.js'
 import { Monitor } from './monitor.js'
 import { PanelBus } from './panel.js'
 import { Exporter } from './exporter.js'
@@ -117,10 +118,11 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   const repos = new Repos(db, logger)
+  try { logger.info('knowledge index reconciled',syncKnowledgeIndex(repos)) } catch(err) { logger.warn('knowledge index reconcile failed',{error:err.message}) }
   const interrupted = repos.monitor.reconcileRuns()
   if (interrupted) logger.warn('closed interrupted sync runs', { count: interrupted })
 
-  // Make every connector — including the ones we cannot legally use — visible.
+  // 让每个数据源都在「数据源健康」里可见（含需要登录的）。
   for (const meta of CONNECTOR_META) {
     repos.monitor.upsertSource({
       connector: meta.connector,
@@ -131,6 +133,13 @@ export function apply(ctx, rawConfig = {}) {
       needsUser: meta.needsUser === true,
       rateLimitNote: meta.rateLimitNote,
     })
+  }
+  // 清理历史遗留/已合并的 connector 行，避免面板出现重复数据源。
+  try {
+    // 仅处理本插件已合并的旧别名，绝不清空未来/第三方注册的其他 connector。
+    repos.db.run('DELETE FROM source_health WHERE connector IN (?, ?, ?)', ['xhs', 'boss', '51job'])
+  } catch (err) {
+    logger.warn('source_health cleanup skipped', { error: String(err?.message ?? err) })
   }
 
   const exporter = new Exporter({ db, repos, config, logger })

@@ -4,29 +4,44 @@ function SettingsTab({ bootstrap, onChanged }) {
   const [notice, setNotice] = useState(null)
   const [posture, setPosture] = useState(false)
   const [deleteToken, setDeleteToken] = useState(null)
+  const [sourceLogin, setSourceLogin] = useState(null)
   const [ruleForm, setRuleForm] = useState({ kind: 'job_deadline', name: '', url: '', company: '', withinDays: 7 })
 
-  const act = (fn, msg) => fn().then((res) => { setNotice(msg); onChanged?.(); return res }).catch((err) => setError(err.message))
+  const act = (fn, msg) => fn().then((res) => { if (res?.ok === false) throw new Error(res.error || '操作未完成'); setError(null); setNotice(res.note || msg); onChanged?.(); return res }).catch((err) => setError(err.message))
+  const loginSite = (site) => act(() => apiPost('/sources/login', { connector: site.key }), '已打开专用浏览器。登录资料只存本机；站点失效时仍需重新登录。')
 
   return h('div', { style: S.col },
     error ? h('div', { style: { ...S.card, ...S.muted, color: T.error } }, error) : null,
     notice ? h('div', { style: { ...S.card, borderColor: T.success, ...S.muted, color: T.success } }, notice) : null,
+    sourceLogin ? h(Modal, { title: '选择登录平台', subtitle: '使用同一个专用浏览器保存各站点登录资料；站点可能要求续期。', onClose: () => setSourceLogin(null), width: 500 },
+      h('div', { style: S.col }, (sourceLogin.sites || []).map(site => h(Btn, { key: site.key, onClick: () => { setSourceLogin(null); loginSite(site) } }, `打开 ${site.label}`)))) : null,
 
     h('div', { style: S.card },
       h('div', { style: S.h2 }, '数据源健康'),
       h('div', { style: { ...S.col, gap: 8 } },
-        (bootstrap?.sources ?? []).map((s) => h('div', { key: s.id, style: S.cardTight },
-          h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap' } },
-            h('div', null,
-              h('div', { style: { ...S.body, fontWeight: 600 } }, s.display_name ?? s.connector),
-              h('div', { style: S.mono }, `${s.connector} · ${s.access_mode}`)),
-            h('div', { style: { ...S.row, gap: 6 } },
-              h(Chip, { tone: s.enabled ? 'success' : 'error' }, s.enabled ? '启用' : '不可用'),
-              s.needsUser ? h(Chip, { tone: 'warn' }, '需手动') : null)),
-          h('div', { style: { ...S.muted, marginTop: 4 } }, s.rate_limit_note),
-          h('div', { style: { ...S.muted, fontSize: 11, marginTop: 3 } },
-            `最后成功 ${s.last_ok_at ? relTime(s.last_ok_at) : '—'} · 抓取 ${s.fetch_count} · 新增 ${s.insert_count} · 去重 ${s.dedupe_count}`),
-          s.last_error ? h('div', { style: { ...S.muted, color: T.error, marginTop: 3 } }, `最后错误：${s.last_error}`) : null)))),
+        (bootstrap?.sources ?? []).map((s) => {
+          const canLogin = s.access_mode === 'browser_session' && (s.sites || []).length > 0
+          return h('div', {
+            key: s.id, style: { ...S.cardTight, cursor: canLogin ? 'pointer' : 'default' },
+            title: canLogin ? '双击打开专用浏览器登录（登录态会持久保存）' : undefined,
+            onDoubleClick: canLogin ? () => setSourceLogin(s) : undefined,
+          },
+            h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap' } },
+              h('div', null,
+                h('div', { style: { ...S.body, fontWeight: 600 } }, s.display_name ?? s.connector),
+                h('div', { style: S.mono }, `${s.connector} · ${s.access_mode}`)),
+              h('div', { style: { ...S.row, gap: 6 } },
+                h(Chip, { tone: s.enabled ? 'success' : 'error' }, s.enabled ? '启用' : '不可用'),
+                s.access_mode === 'browser_session' ? h(Chip, { tone: 'warn' }, '使用本机登录态') : (s.access_mode === 'user_input' ? h(Chip, null, '手动导入') : null),
+                canLogin ? h(Btn, { kind: 'primary', onClick: (e) => { e.stopPropagation(); setSourceLogin(s) } }, '登录／续期') : null)),
+            canLogin ? h('div', { style: { ...S.col, gap: 4, marginTop: 8 } }, (s.sites || []).map(site => h('div', { key: site.key, style: { ...S.row, flexWrap: 'wrap', justifyContent: 'space-between' } },
+              h('span', { style: S.muted }, `${site.label} · ${site.lastCheck ? `${site.lastCheck.status === 'ok' ? '最近采集成功' : '最近采集失败'} · ${relTime(site.lastCheck.at)} · ${site.lastCheck.found}条 / JD ${site.lastCheck.jdFilled}` : '尚未实测'}`),
+              h(Btn, { onClick: (e) => { e.stopPropagation(); loginSite(site) } }, '打开登录页')))) : null,
+            h('div', { style: { ...S.muted, marginTop: 4 } }, s.rate_limit_note),
+            h('div', { style: { ...S.muted, fontSize: 11, marginTop: 3 } },
+              `最后成功 ${s.last_ok_at ? relTime(s.last_ok_at) : '—'} · 抓取 ${s.fetch_count} · 新增 ${s.insert_count} · 去重 ${s.dedupe_count}`),
+            s.last_error ? h('div', { style: { ...S.muted, color: T.error, marginTop: 3 } }, `最后错误：${s.last_error}`) : null)
+          }))),
 
     h('div', { style: S.card },
       h('div', { style: S.h2 }, '监控规则'),

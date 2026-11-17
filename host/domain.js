@@ -91,13 +91,16 @@ export function parseInternshipType(text) {
   return null
 }
 
-export const RECRUIT_TYPES = ['autumn_campus', 'spring_campus', 'summer', 'daily', 'other']
+export const RECRUIT_TYPES = ['autumn_campus', 'spring_campus', 'summer', 'daily', 'campus', 'social', 'intern', 'other']
 
 export const RECRUIT_LABEL = {
   autumn_campus: '秋招',
   spring_campus: '春招',
   summer: '暑期实习',
   daily: '日常实习',
+  campus: '校招（批次未明）',
+  social: '社会招聘',
+  intern: '实习（类型未明）',
   other: '其他',
 }
 
@@ -216,7 +219,9 @@ export function normalizeJob(input = {}) {
   const haystack = [title, description, requirements, input.department, input.notes].filter(Boolean).join('\n')
 
   const internshipType = str(input.internshipType ?? input.internship_type, 20) ?? parseInternshipType(haystack)
-  const location = str(input.location ?? input.city, 200) ?? extractCity(haystack)
+  const inferredCity = extractCity(haystack)
+  // 无城市命中时 extractCity 的原文兜底不适用于整份JD，不能把全文写进location。
+  const location = str(input.location ?? input.city, 200) ?? (inferredCity === haystack ? null : inferredCity)
   const remoteType = str(input.remoteType ?? input.remote_type, 20) ?? parseRemoteType(haystack)
   const daysPerWeek = num(input.daysPerWeek ?? input.days_per_week) ?? parseDaysPerWeek(haystack)
   const skills = arr(input.skills).length ? arr(input.skills) : extractSkills(haystack)
@@ -279,18 +284,24 @@ export function findJobIdentity(db, job, candidates) {
   // 有岗位编号时不按 URL 相认：一次列表抓取里所有岗位共用同一个 pageUrl，
   // 若拿它当身份，整页岗位会被合并成一条。编号已是更强的身份，跳过这一层。
   if (job.url && !job.jobCode) {
-    const row = db.get('SELECT job_id AS id FROM job_source WHERE source_url = ? LIMIT 1', [job.url])
-    if (row) return { id: row.id, reason: 'source_url' }
+    // 公共列表URL不是唯一岗位身份：必须同时校验公司、岗位名和兼容地点。
+    const row = db.get('SELECT j.id, j.location FROM job_source s JOIN job j ON j.id = s.job_id WHERE s.source_url = ? AND j.company_id IS ? AND j.title_key = ? LIMIT 1', [job.url, job.companyId ?? null, job.titleKey])
+    if (row) {
+      const a = normKey(row.location ?? ''), b = normKey(job.location ?? '')
+      if (!a || !b || a === b || a.includes(b) || b.includes(a)) return { id: row.id, reason: 'source_url' }
+    }
   }
   const exact = db.get('SELECT id FROM job WHERE dedupe_key = ?', [computeDedupeKey(job)])
   if (exact) return { id: exact.id, reason: 'dedupe_key' }
 
   // Fuzzy: same company (by key) + similar normalized title + compatible location.
   const pool = candidates ?? db.all(
-    'SELECT id, title, title_key, location FROM job WHERE company_name = ? OR company_id = ? LIMIT 60',
+    'SELECT id, title, title_key, location, job_code FROM job WHERE company_name = ? OR company_id = ? LIMIT 60',
     [job.companyName, job.companyId ?? null],
   )
   for (const row of pool) {
+    // 明确的不同岗位编号不能被模糊标题合并（同公司多个同名岗位很常见）。
+    if (job.jobCode && row.job_code && job.jobCode !== row.job_code) continue
     const sim = similarity(row.title ?? '', job.title)
     const locA = normKey(row.location ?? '')
     const locB = normKey(job.location ?? '')
@@ -481,7 +492,7 @@ export function analyzeMatch(profile, job, weightsOverride) {
 
   let band
   if (hardBlocks.length) band = 'hard_mismatch'
-  else if (!job.description && !job.requirements && !requiredSkills.length) band = 'insufficient_info'
+  else if (![job.description, job.requirements].some(v => typeof v === 'string' && v.trim()) && !requiredSkills.length) band = 'insufficient_info'
   else if (score >= 80) band = 'high_priority'
   else if (score >= 65) band = 'worth_trying'
   else band = 'needs_strengthening'

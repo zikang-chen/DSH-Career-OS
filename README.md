@@ -2,7 +2,7 @@
 
 Personal AI career intelligence & internship management for **DeepSeek Harness**.
 
-一个装进 DSH 的 Cordis bundle：36 个 Agent 工具 + 一个 9 页签的求职面板 + 本地 SQLite 知识库。
+一个装进 DSH 的 Cordis bundle：84 个 Agent 工具 + 11 页签（5 组导航）的求职面板 + 本地 SQLite 分类知识库。
 所有数据只存本机；不自动投递、不对外发信。
 
 ```
@@ -10,7 +10,7 @@ D:\career_os\            ← 这个包本身就是 bundle
 ├── host/                Host 半（纯 ESM，零外部依赖）
 ├── client/              浏览器半（手写 CJS → __ModuleLoader__ 包装）
 ├── scripts/             build-client.mjs · extract_resume.py
-├── tests/               60 个 node:test 用例（核心/抓取/计划/渲染）
+├── tests/               node:test 全量回归（采集/JD/知识库/OCR/投递冻结/渲染）
 ├── docs/                架构 / 数据模型 / 数据源政策 / 开发 / 使用 / 验收
 └── data/                career.db · logs · backups · exports（运行时生成）
 ```
@@ -89,7 +89,7 @@ D:\career_os\            ← 这个包本身就是 bundle
 手动复制 cURL 还是麻烦。`career_browser_login` + `career_browser_capture` 把这一步也省掉：
 
 1. `career_browser_login` 打开一个**专用浏览器窗口**（Edge/Chrome，独立 profile 存在 `data/browser-profile`）；
-2. 你在那个窗口里正常登录目标站点——登录态持久化，**以后都不用再登**；
+2. 你在那个窗口里正常登录目标站点——登录资料跨重启保留；站点失效或要求验证时仍需续期；
 3. 之后 `career_browser_capture` 打开岗位页，用 CDP 监听页面自己发出的网络响应，把 JSON 抓回来解析入库。
 
 不需要 F12、不需要复制任何东西。
@@ -125,7 +125,7 @@ career_browser_capture {url:"…", company:"腾讯"}   → 抓取入库
 | 抓取时间 + 筛选范围指纹 | **7 天过期**判断：`captureFreshness` 返回 ageDays / stale / dueAt |
 | 这次抓到多少、新增几条 | 两次抓取之间的 **added / removed / unchanged** |
 
-**一个关键的设计约束**：只有**筛选范围相同**的两次抓取才能判定「下架」。
+**一个关键的设计约束**：只有**筛选范围相同，且前后两次都已证明完整、没有分页截断或解析失败**时才能报告消失岗位。
 上次看「产品」这次看全部，消失的岗位不能算关闭——`diffCaptures` 会返回
 `scopesComparable: false` 并把它们放进 `vanishedButNotClosed`，不会误报。
 
@@ -140,7 +140,7 @@ career_browser_capture {url:"…", company:"腾讯"}   → 抓取入库
 
 投递记录不只是「投了哪家」，而是**可复盘的凭据**：
 
-- **JD 快照** —— `career_application_create` 会把当时的 JD 冻结进记录。岗位被 sync 刷新或删除后，
+- **JD 快照** —— 草稿可更新；首次正式投递会把最终 JD 冻结进记录。岗位被 sync 刷新或删除后，
   面试前一天仍能看到「我当时投的是什么要求」。
 - **材料快照** —— 记录这次提交用了哪版简历、附了哪些资料（`docIds`），没指定就诚实标注「未指定」。
 - **冷冻期提醒** —— 同公司 6 个月内重复投递会直接告警（多数公司有冷冻期，重复投递会被筛掉）。
@@ -169,6 +169,8 @@ career_browser_capture {url:"…", company:"腾讯"}   → 抓取入库
 - [代码审计与优化计划](docs/AUDIT.md)
 - [数据采集调研结论（小红书/BOSS/51job/OfferShow）](docs/SOURCES-RESEARCH.md)
 - [简历优化 Skill 库](docs/resume-skills.md)
+- [知识库分类契约](docs/KNOWLEDGE-PLAN.md)
+- [产品经理走查与验收边界](docs/PRODUCT-REVIEW.md)
 - [架构与技术决策](docs/architecture.md)
 - [数据模型与状态机](docs/data-model.md)
 - [数据源政策与合规边界](docs/source-policy.md)
@@ -180,8 +182,8 @@ career_browser_capture {url:"…", company:"腾讯"}   → 抓取入库
 
 ```powershell
 node --test tests\core.test.mjs      # 单个套件
-node --test tests\                   # 全部 133 个测试（9 个套件）
-node scripts\build-client.mjs        # 改过 client/index.cjs 后重新生成 bundle
+npm test                            # 运行全部 *.test.mjs 回归
+node scripts\build-client.mjs        # 改过 client/parts 后重新生成 bundle
 node scripts\setup-runtime.mjs       # 装 PDF 解析依赖到项目内 runtime/pylib
 ```
 
@@ -189,6 +191,6 @@ node scripts\setup-runtime.mjs       # 装 PDF 解析依赖到项目内 runtime/
 
 ## 现状
 
-schema **v13** / ftsMode `trigram` / **82 工具** / 22 个测试套件 239 个用例全绿 / 面板已进入 Web boot graph。
+schema **v14** / ftsMode `trigram` / **84 工具**。真实采集验收见 [数据源报告](docs/SOURCES-RESEARCH.md)，当前实现与剩余限制见 [状态清单](docs/STATUS.md)。
 `data/` 与 `runtime/` 不入库（含真实简历与联系方式）；新机器克隆后跑一次 `scripts/setup-runtime.mjs` 即可。
 详见 [docs/acceptance-report.md](docs/acceptance-report.md) 与 [docs/environment.md](docs/environment.md)。

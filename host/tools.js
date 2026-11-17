@@ -13,8 +13,11 @@ import { checkResumeQuality } from './quality.js'
 import { findJobsForMe, jdCompleteness, prepResumeForJob, summarizeApplications } from './workflows.js'
 import { envelope } from './envelope.js'
 import { buildInterviewPlan } from './interview.js'
-import { SITE_PROFILES, getSiteProfile } from './sites.js'
+import { SITE_PROFILES, classifyRecruitType, filterByRecruitType, getSiteProfile, loginUrlForConnector } from './sites.js'
 import { RESUME_SKILLS, analyzeBullets } from './resume_skills.js'
+import { captureSite, sourceHealthRows } from './site-capture.js'
+import { fetchOfferShowSalaryHighlights } from './offershow.js'
+import {processKnowledgeOcr,ocrStatus} from './ocr.js'
 import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
@@ -66,6 +69,16 @@ export function registerCareerTools(ctx, deps) {
     registered.push(definition.name)
   }
 
+  add(makeTool({name:'career_knowledge',description:'分类知识库：列出/读取岗位JD、面经、公告、薪资和研究，按公司/岗位/平台/整理状态检索；整理不覆盖原文。',params:{action:S('list|get|update|stats'),id:S('资料id'),query:S('全文关键词'),kind:S('job|interview|announcement|salary|research'),company:S('公司'),platform:S('来源平台'),status:S('inbox|active|archived'),role:S('整理后的岗位方向'),notes:S('整理备注'),tags:SA('整理标签'),limit:N('页大小'),offset:N('偏移')},handler:(args)=>{
+    const action=args.action??'list'
+    if(action==='get')return {ok:true,item:repos.knowledge.get(String(args.id))}
+    if(action==='stats')return {ok:true,stats:repos.knowledge.stats()}
+    if(action==='update'){const patch={};for(const key of ['status','company','role','notes','tags'])if(args[key]!==undefined)patch[key]=args[key];return {ok:true,item:repos.knowledge.update(String(args.id),patch)}}
+    if(action!=='list')throw new Error('action必须list/get/update/stats')
+    return {ok:true,...repos.knowledge.list(args),stats:repos.knowledge.stats()}
+  }}))
+  add(makeTool({name:'career_knowledge_ocr',description:'对知识库关联图片执行本机OCR并保留原图哈希/逐图结果。识别默认待人工核对；不上传第三方、不覆盖作者正文。',params:{action:S('status|recognize；人工核对仅在界面完成'),id:S('知识库资料id'),index:N('图片序号，从1开始')},handler:(args)=>args.action==='status'?ocrStatus({dataDir:config.dataDir}):args.action==='review'?{ok:false,error:'人工核对仅限用户在知识库界面确认，Agent不能代确认'}:processKnowledgeOcr({...args,action:'recognize'},{repos,config})}))
+
   // ── system / profile ───────────────────────────────────────────────────────
   add(makeTool({
     name: 'career_status',
@@ -80,10 +93,10 @@ export function registerCareerTools(ctx, deps) {
         jobStats: repos.jobs.stats(),
         applicationStats: repos.applications.stats(),
         unreadNotifications: repos.monitor.unreadCount(),
-        sources: repos.monitor.listSources().map((s) => ({
+        sources: sourceHealthRows(repos).map((s) => ({
           connector: s.connector, displayName: s.display_name, accessMode: s.access_mode,
           enabled: s.enabled, needsUser: s.needsUser, lastOkAt: s.last_ok_at, lastError: s.last_error,
-          rateLimitNote: s.rate_limit_note, capabilities: s.capabilities,
+          rateLimitNote: s.rate_limit_note, capabilities: s.capabilities, sites: s.sites,
         })),
         tools: registered.slice(),
         dataDir: config.dataDir,
@@ -737,13 +750,15 @@ export function registerCareerTools(ctx, deps) {
   // ── 专用浏览器：登录一次，之后自动抓 ──────────────────────────────────────
   add(makeTool({
     name: 'career_browser_login',
-    description: '打开「专用浏览器」让你登录目标站点（字节/腾讯/学校就业网等）。这个窗口有独立 profile（存在 data/browser-profile），登录一次以后一直有效。注意：不能用 DSH 内置浏览器——那是沙箱 webview，插件读不到页面。',
+    description: '打开「专用浏览器」让你登录目标站点（字节/腾讯/学校就业网等）。这个窗口有独立 profile（存在 data/browser-profile），登录资料跨重启保留；站点失效时仍需重新登录。注意：不能用 DSH 内置浏览器——那是沙箱 webview，插件读不到页面。',
     params: {
       url: S('要打开并登录的网址，如 https://jobs.bytedance.com/campus'),
+      site: S('或直接给站点：xhs | boss | 51job | offershow | nowcoder（自动取登录页）'),
     },
-    required: ['url'],
     handler: async (args) => {
-      const result = await openForLogin({ dataDir: config.dataDir, url: String(args.url), logger })
+      const url = str(args.url, 2000) ?? loginUrlForConnector(str(args.site, 40)) ?? (getSiteProfile(args.site)?.loginUrl) ?? null
+      if (!url) throw new Error('需要 url 或受支持的 site（xhs/boss/51job/offershow）')
+      const result = await openForLogin({ dataDir: config.dataDir, url, logger })
       return {
         ...result,
         executable: findBrowserExecutable(),
@@ -807,7 +822,8 @@ export function registerCareerTools(ctx, deps) {
         }
       }
 
-      const limit = Math.min(Number(args.limit ?? 200), 1000)
+      const requestedLimit = Number(args.limit ?? 200)
+      const limit = Number.isFinite(requestedLimit) ? Math.max(0, Math.min(Math.floor(requestedLimit), 1000)) : 200
       const company = str(args.company, 200) ?? null
       const normalized = postings.slice(0, limit).map((posting) => postingToJob(posting, { company, pageUrl: sourceUrl }))
       // 调用方显式给了批次就以它为准（用户就是按这个筛选抓的），
@@ -848,11 +864,28 @@ export function registerCareerTools(ctx, deps) {
       // 两次抓取的集合差异：新增 / 下架。
       // 基准是「上一次同范围抓取看到的编号集合」，不是整个公司岗位库——
       // 否则换个筛选范围再抓，就会把别的批次的岗位全报成下架。
-      const batchRows = normalized.map((job, index) => ({
-        jobCode: job.jobCode ?? postings[index]?.jobCode ?? null,
+      // 只把本次成功入库的不同岗位作为观察集合；不能把 limit 之前的总条数或失败行当已抓全。
+      const batchJobs = [...new Set([...imported.created, ...imported.merged])]
+        .map((id) => repos.jobs.getJob(id)).filter(Boolean)
+      const batchRows = batchJobs.map((job) => ({
+        jobCode: job.job_code ?? null,
         title: job.title,
         location: job.location,
       }))
+      const parseWarnings = (imported.failed ?? []).map((failure) => String(failure.error ?? failure.title ?? '入库失败'))
+      if (withCompany.length < normalized.length) parseWarnings.push(`缺失标题，跳过 ${normalized.length - withCompany.length} 条。`)
+      const missingCodes = batchRows.filter((row) => !row.jobCode).length
+      if (missingCodes) parseWarnings.push(`${missingCodes} 条成功岗位缺少编号，编号基线不完整。`)
+      const completeness = repos.captures.assessCompleteness({
+        reportedTotal,
+        extractedCount: postings.length,
+        batchCount: normalized.length,
+        observedCount: batchRows.length,
+        failedCount: imported.failed?.length ?? 0,
+        parseWarnings,
+        // 这里只处理捕获的网络 JSON；截图/列表可见文本不得声明 API 已全量。
+        evidenceKind: 'api-json',
+      })
       const prevCodes = Array.isArray(previousCapture?.seenCodes) ? previousCapture.seenCodes : null
       const hasBaseline = Boolean(previousCapture && prevCodes)
       const prevRows = hasBaseline
@@ -867,6 +900,11 @@ export function registerCareerTools(ctx, deps) {
           current: batchRows.map((row) => ({ ...row, companyKey: ckey })),
           previousScopeKey: previousCapture.scope_key,
           currentScopeKey: scopeKey,
+          // 旧版本 is_complete 未检查 limit/失败；没有校验明细的历史记录按未知处理。
+          previousCompleteness: previousCapture.stats?.completeness
+            ? { ...previousCapture.stats.completeness, isComplete: previousCapture.isComplete === true && previousCapture.stats.completeness.isComplete === true, parseWarnings: previousCapture.parseWarnings }
+            : null,
+          currentCompleteness: completeness,
         })
         : null
 
@@ -876,9 +914,9 @@ export function registerCareerTools(ctx, deps) {
       if (ckey) {
         const codeMap = repos.captures.jobIdByCode(companyName, batchRows.map((row) => row.jobCode))
         const rowsForSnapshot = []
-        normalized.forEach((job, index) => {
-          const code = batchRows[index]?.jobCode
-          const jobId = code ? codeMap.get(String(code)) : null
+        normalized.forEach((job) => {
+          const code = job.jobCode
+          const jobId = code && batchRows.some((row) => String(row.jobCode) === String(code)) ? codeMap.get(String(code)) : null
           if (!jobId) return
           rowsForSnapshot.push({
             jobId, companyKey: ckey, title: job.title, location: job.location,
@@ -897,12 +935,12 @@ export function registerCareerTools(ctx, deps) {
           created: imported.created.length,
           merged: imported.merged.length,
           seenCodes: batchRows.map((row) => row.jobCode).filter(Boolean),
-          // 采集完整性：列表接口报的总数 vs 本次实际拿到的条数。
+          // 完整性须基于 limit 后实际成功记录数，并保留校验证据供下次 diff 使用。
           reportedTotal,
-          observedCount: postings.length,
-          isComplete: reportedTotal === null ? null : postings.length >= reportedTotal,
-          parseWarnings: imported.failed?.length ? imported.failed.slice(0, 10).map((f) => String(f.error ?? f.title ?? '')) : null,
-          stats: { strategy, parsed: withCompany.length, jdSnapshots: savedSnapshots },
+          observedCount: batchRows.length,
+          isComplete: completeness.isComplete,
+          parseWarnings: completeness.parseWarnings,
+          stats: { strategy, parsed: withCompany.length, failed: imported.failed?.length ?? 0, jdSnapshots: savedSnapshots, completeness },
           note: 'career_browser_capture',
         })
       }
@@ -925,7 +963,7 @@ export function registerCareerTools(ctx, deps) {
         for (const job of targets.slice(0, 60)) {
           const provider = resolveJdProvider({ applyUrl: job.apply_url, url: job.url })
           if (!provider) { failed.push({ title: job.title, error: '这家公司没登记详情接口' }); continue }
-          const res = await fetchJdDetail({ provider, postId: job.post_id, jobCode: job.job_code, timeoutMs: config.httpTimeoutMs })
+          const res = await fetchJdDetail({ provider, postId: job.post_id, jobCode: job.job_code, url: job.apply_url ?? job.url, dataDir: config.dataDir, timeoutMs: config.httpTimeoutMs })
           if (!res.ok) { failed.push({ title: job.title, error: res.error }); continue }
           const w = repos.jobs.setJd(job.id, res)
           if (w?.updated) {
@@ -948,16 +986,7 @@ export function registerCareerTools(ctx, deps) {
         failed: imported.failed.slice(0, 10),
         sample: preview.slice(0, 10),
         jdFill,
-        completeness: {
-          reportedTotal,
-          observed: postings.length,
-          isComplete: reportedTotal === null ? null : postings.length >= reportedTotal,
-          note: reportedTotal === null
-            ? '接口没有返回总数，无法判断是否抓全。'
-            : (postings.length >= reportedTotal
-              ? `接口报共 ${reportedTotal} 条，本次全部拿到。`
-              : `接口报共 ${reportedTotal} 条，本次只拿到 ${postings.length} 条——**这不代表其余岗位已关闭**，只是没翻页。`),
-        },
+        completeness,
         freshness: {
           previousCaptureAt: previousCapture?.captured_at ?? null,
           previousScope: previousCapture?.scope ?? null,
@@ -971,6 +1000,9 @@ export function registerCareerTools(ctx, deps) {
             removedCount: setDiff.removed.length,
             unchanged: setDiff.unchanged,
             scopesComparable: setDiff.scopesComparable,
+            vanishedButNotClosed: setDiff.vanishedButNotClosed.slice(0, 40),
+            vanishedButNotClosedCount: setDiff.vanishedButNotClosed.length,
+            reason: setDiff.reason,
             caveat: setDiff.caveat,
           }
           : {
@@ -979,14 +1011,16 @@ export function registerCareerTools(ctx, deps) {
             seenCount: batchRows.length,
             scopesComparable: false,
             caveat: previousCapture
-              ? `上次抓取（范围「${previousCapture.scope ?? '全部'}」）没有记录岗位编号明细，无法可靠判定下架；本次看到 ${batchRows.length} 条并已建立基线，下次抓取就能报新增/下架。`
-              : `这是「${args.scope ?? '全部'}」范围的首次抓取，本次看到 ${batchRows.length} 条并已建立基线，下次再抓就能报新增/下架。`,
+              ? `上次抓取（范围「${previousCapture.scope ?? '全部'}」）没有记录岗位编号明细，无法可靠判定下架；本次成功记录 ${batchRows.length} 条并建立观察基线，仅前后同范围且均证实完整时才报下架。`
+              : `这是「${args.scope ?? '全部'}」范围的首次抓取，本次成功记录 ${batchRows.length} 条并建立观察基线，仅前后同范围且均证实完整时才报下架。`,
           },
         jdChanges: jdChanges.slice(0, 30),
         jdSnapshotsSaved: savedSnapshots,
-        next: setDiff && (setDiff.added.length || setDiff.removed.length)
-          ? `本次变化：新增 ${setDiff.added.length} 条、下架 ${setDiff.removed.length} 条。可以让我针对新增岗位做匹配排序。`
-          : (setDiff ? '与上次相比没有变化。' : '已建立该范围的抓取基线，7 天后或下次重抓可看到变化。'),
+        next: setDiff?.vanishedButNotClosed.length
+          ? `本次新增 ${setDiff.added.length} 条，另有 ${setDiff.vanishedButNotClosed.length} 条本次未见，完整性或范围证据不足，不能判下架；需补全抓取或官网复核。`
+          : setDiff && (setDiff.added.length || setDiff.removed.length)
+            ? `本次变化：新增 ${setDiff.added.length} 条、下架 ${setDiff.removed.length} 条。可以让我针对新增岗位做匹配排序。`
+            : (setDiff ? (setDiff.reason ? '本次观察集合无变化，但抓取完整性未证实，不能确认全量岗位无变化。' : '与上次相比没有变化。') : '已建立该范围的观察基线；仅前后均证实完整的同范围抓取可用于判定下架。'),
         note: '来源记为「专用浏览器自动捕获」，状态 UNVERIFIED（不是官网页面直采）；需要时可 career_job_verify 升级。',
       }
     },
@@ -1127,7 +1161,7 @@ export function registerCareerTools(ctx, deps) {
           skipped.push({ id: job.id, company: job.company_name, title: job.title, reason: '这家公司的详情接口没有登记' })
           continue
         }
-        const result = await fetchJdDetail({ provider, postId: job.post_id, jobCode: job.job_code, timeoutMs: config.httpTimeoutMs })
+        const result = await fetchJdDetail({ provider, postId: job.post_id, jobCode: job.job_code, url: job.apply_url ?? job.url, dataDir: config.dataDir, timeoutMs: config.httpTimeoutMs })
         if (!result.ok) {
           failed.push({ id: job.id, company: job.company_name, title: job.title, error: result.error })
           continue
@@ -1256,81 +1290,21 @@ export function registerCareerTools(ctx, deps) {
     name: 'career_site_capture',
     description: '按站点采集：小红书（笔记/面经）、BOSS直聘、前程无忧（岗位）。用专用浏览器打开你已登录的搜索页，读页面自己发出的 JSON 并解析。首次默认只预览（dryRun=true），确认后再写入。',
     params: {
-      site: S('站点：xhs | boss | 51job'),
+      site: S('站点：xhs | boss | 51job | offershow | nowcoder'),
       keyword: S('搜索关键词（必填）'),
       city: S('城市（BOSS 用城市码或名称，可选）'),
       url: S('直接给搜索页 URL（可选，优先于自动拼接）'),
       useOpenTab: B('从你已打开的同源标签页抓（会重载），默认 false'),
       dryRun: B('只预览不写库，默认 true（安全）'),
       limit: N('最多导入/预览多少条，默认 30'),
+      recruitType: S('只看某类：campus（校招）/ social（社招）/ intern（实习）'),
+      fillJd: B('预览或入库时是否抓 JD 正文（默认 true，串行打开详情）'),
+      fillJdLimit: N('最多为多少条抓 JD 正文，默认 3（0–20）'),
+      fillBody: B('小红书是否进一步读取笔记正文，默认 true'),
+      bodyLimit: N('最多补几篇小红书正文，默认 2（0–10）'),
     },
     required: ['site'],
-    handler: async (args) => {
-      const profile = getSiteProfile(args.site)
-      if (!profile) return { ok: false, error: `未知站点「${args.site}」`, sites: Object.keys(SITE_PROFILES).map((k) => ({ key: k, label: SITE_PROFILES[k].label })) }
-      const keyword = str(args.keyword, 100)
-      const targetUrl = str(args.url, 2000) ?? (keyword ? profile.searchUrl({ keyword, city: str(args.city, 60) ?? undefined }) : null)
-      if (!targetUrl) return { ok: false, error: '需要 keyword 或 url' }
-
-      const captured = await capturePageJson({
-        dataDir: config.dataDir,
-        url: targetUrl,
-        matchUrl: args.useOpenTab === true ? targetUrl : undefined,
-        patterns: profile.patterns,
-        timeoutMs: Math.min(Number(args.timeoutMs ?? 25000), 60000),
-        logger,
-      })
-      if (!captured.ok) {
-        return {
-          ok: false,
-          site: profile.key,
-          stage: 'capture',
-          error: captured.error,
-          candidates: captured.candidates ?? [],
-          next: `先在 career_browser_login 登录 ${profile.loginUrl}，在页面上完成一次搜索让列表出现，再用 useOpenTab=true 重试。${profile.note}`,
-        }
-      }
-      const items = profile.parse(captured.captured.json) || []
-      if (!items.length) {
-        return {
-          ok: false,
-          site: profile.key,
-          stage: 'parse',
-          capturedUrl: captured.captured.url,
-          responseShape: describeJsonShape(captured.captured.json),
-          candidates: captured.candidates,
-          next: '抓到的响应里没解析出内容——看 responseShape 判断是不是配置接口，或换 useOpenTab 重试。',
-        }
-      }
-      const limited = items.slice(0, Math.min(Number(args.limit ?? 30), 200))
-      if (args.dryRun !== false) {
-        return { ok: true, site: profile.key, dryRun: true, found: items.length, preview: limited.slice(0, 20), next: '确认后传 dryRun=false 写入。' }
-      }
-
-      if (profile.kind === 'job') {
-        const imported = repos.jobs.importPostings(limited.map((it) => ({
-          company: it.company, title: it.title, location: it.location,
-          salaryText: it.salaryText, jobCode: it.jobCode, url: it.url, applyUrl: it.url,
-        })), { pageUrl: captured.captured.url, official: false, sourceName: `${profile.label}（CDP 采集，未核验）` })
-        panel.publish({ kind: 'jobs' })
-        return { ok: true, site: profile.key, dryRun: false, found: items.length, created: imported.created.length, merged: imported.merged.length, failed: imported.failed.slice(0, 5), next: '岗位已入库（UNVERIFIED），可在岗位雷达查看。' }
-      }
-
-      // 笔记/面经 → 资料库（forum_post），自带内容哈希去重
-      let saved = 0
-      let duplicate = 0
-      for (const it of limited) {
-        const content = [it.title, it.desc].filter(Boolean).join('\n\n')
-        if (!content) continue
-        const post = repos.intel.addForumPost({
-          platform: 'xiaohongshu', content, url: it.url, title: it.title, author: it.author,
-          publishedAt: it.publishedAt ?? undefined, accessMode: 'public_page',
-        })
-        if (post.duplicate) duplicate += 1
-        else saved += 1
-      }
-      return { ok: true, site: profile.key, dryRun: false, found: items.length, saved, duplicate, next: '笔记已入资料库（论坛情报），可在「面试准备/论坛」查看，并作为面试调研素材。' }
-    },
+    handler: (args) => captureSite(args, { config, repos, panel, logger }),
   }))
 
   add(makeTool({
@@ -1360,78 +1334,43 @@ export function registerCareerTools(ctx, deps) {
 
   add(makeTool({
     name: 'career_job_research',
-    description: '针对某个岗位做一页调研：JD（库里已有就直接用，否则提示去官方/站点抓）+ 小红书相关笔记（面经/线索）+ OfferShow 薪资爆料，汇总成调研包。需要对应站点已用专用浏览器登录；没登录会诚实返回登录指引。',
+    description: '一站调研：读取或搜索JD候选并补正文，采集小红书面经文字与OfferShow校招计划。职位不唯一时返回候选，不擅自认定；薪资未核实绝不把校招计划当薪资。依赖本机专用浏览器登录。',
     params: {
-      jobId: S('岗位 id（推荐）'),
-      company: S('公司名（没有 jobId 时用）'),
-      title: S('岗位名（没有 jobId 时用）'),
-      keyword: S('自定义搜索关键词（默认「公司 岗位 面经」）'),
-      includeXhs: B('是否采集小红书，默认 true'),
-      includeOffershow: B('是否采集 OfferShow，默认 true'),
-      useOpenTab: B('从你已打开的同源标签页抓（会重载），默认 false'),
+      jobId: S('岗位id'), company: S('公司名'), title: S('岗位名'), keyword: S('面经关键词'),
+      includeXhs: B('默认true'), includeOffershow: B('默认true'), useOpenTab: B('复用同源标签页'),
+      recruitType: S('campus/social/intern'), site: S('库外JD搜索平台：boss或51job，默认boss'),
     },
     handler: async (args) => {
-      let job = args.jobId ? repos.jobs.getJob(String(args.jobId)) : null
-      const company = str(args.company, 120) ?? job?.company_name ?? null
-      const title = str(args.title, 200) ?? job?.title ?? null
-      if (!job && company && title) {
-        const hits = repos.jobs.listJobs({ company, limit: 300 }, repos.profile.get())
-        job = hits.find((j) => String(j.title).includes(title) || title.includes(String(j.title))) ?? null
-      }
-      const jdText = job ? [job.description, job.requirements].filter(Boolean).join('\n') : ''
-      const result = {
-        ok: true,
-        target: { jobId: job?.id ?? null, company, title },
-        jd: job
-          ? { available: Boolean(jdText.trim()), completeness: jdCompleteness(job), source: '岗位库', status: job.status, location: job.location, applyUrl: job.apply_url ?? null }
-          : { available: false, note: '岗位库里没有这个岗位；可先用 career_campus_portal + career_browser_capture 抓官方岗位，或粘贴 JD。' },
-        xhs: null,
-        offershow: null,
-        caveats: [],
-      }
-
-      const kw = str(args.keyword, 120) ?? [company, title, '面经'].filter(Boolean).join(' ')
-      if (args.includeXhs !== false && kw.trim()) {
-        const prof = getSiteProfile('xhs')
-        const cap = await capturePageJson({
-          dataDir: config.dataDir, url: prof.searchUrl({ keyword: kw }),
-          matchUrl: args.useOpenTab === true ? prof.searchUrl({ keyword: kw }) : undefined,
-          patterns: prof.patterns, timeoutMs: 20000, logger,
-        })
-        if (cap.ok) {
-          const notes = prof.parse(cap.captured.json).slice(0, 10)
-          result.xhs = notes.length
-            ? { ok: true, count: notes.length, notes, sourceUrl: cap.captured.url }
-            : { ok: false, error: '抓到了响应但没解析出笔记', responseShape: describeJsonShape(cap.captured.json) }
-        } else {
-          result.xhs = { ok: false, error: cap.error, loginUrl: prof.loginUrl, next: '先 career_browser_login 登录小红书，搜一次让列表出现，再用 useOpenTab=true 重试。' }
+      let job=args.jobId?repos.jobs.getJob(String(args.jobId)):null
+      const company=str(args.company,120)??job?.company_name
+      const title=str(args.title,200)??job?.title
+      if(!job && !(company && title)) return {ok:false,error:'需要jobId或公司+岗位名'}
+      if(!job){const hits=repos.jobs.listJobs({company,limit:300});job=hits.find(j=>j.title===title)??null}
+      const result={ok:true,target:{jobId:job?.id??null,company,title},jd:null,xhs:null,offershow:null}
+      if(job){
+        if(!job.description && !job.requirements){
+          const provider=resolveJdProvider({url:job.apply_url??job.url})
+          if(provider){
+            const detail=await fetchJdDetail({provider,url:job.apply_url??job.url,postId:job.post_id,jobCode:job.job_code,dataDir:config.dataDir,timeoutMs:14000})
+            if(detail.ok){repos.jobs.setJd(job.id,detail);job=repos.jobs.getJob(job.id)}
+            else result.jdError=detail.error
+          }
         }
+        result.jd={available:Boolean(job.description||job.requirements),description:job.description,requirements:job.requirements,completeness:jdCompleteness(job),source:'岗位库/岗位详情',status:job.status,location:job.location,applyUrl:job.apply_url}
+      }else{
+        const candidates=await captureSite({site:args.site==='51job'?'51job':'boss',keyword:[company,title].join(' '),recruitType:args.recruitType,dryRun:true,limit:5,fillJd:true,fillJdLimit:2},{config,repos,panel,logger})
+        result.jd={available:false,candidates:candidates.preview??[],search:candidates.search,error:candidates.error,note:'库外返回JD候选；未自动入库或把不同部门岗位当成同一岗位。'}
       }
-      if (args.includeOffershow !== false && company) {
-        const prof = getSiteProfile('offershow')
-        const cap = await capturePageJson({
-          dataDir: config.dataDir, url: prof.searchUrl({ keyword: company }),
-          matchUrl: args.useOpenTab === true ? prof.searchUrl({ keyword: company }) : undefined,
-          patterns: prof.patterns, timeoutMs: 20000, logger,
-        })
-        if (cap.ok) {
-          const reports = prof.parse(cap.captured.json).slice(0, 10)
-          result.offershow = reports.length
-            ? { ok: true, count: reports.length, reports, sourceUrl: cap.captured.url, evidenceLevel: 'C' }
-            : { ok: false, error: '抓到了响应但没解析出薪资爆料', responseShape: describeJsonShape(cap.captured.json) }
-        } else {
-          result.offershow = { ok: false, error: cap.error, loginUrl: prof.loginUrl, next: '先 career_browser_login 登录 offershow.cn，再用 useOpenTab 重试。' }
-        }
+      if(args.includeXhs!==false){
+        result.xhs=await captureSite({site:'xhs',keyword:str(args.keyword,120)??[company,title,'面经'].join(' '),dryRun:true,limit:5,bodyLimit:2,useOpenTab:args.useOpenTab},{config,repos,panel,logger})
       }
-
-      result.caveats = [
-        '小红书笔记与 OfferShow 爆料都是用户生成内容，属 C 级证据，样本小、可能有偏，别当成官方结论。',
-        '薪资爆料只作参考，不作为谈薪依据；官方 JD 与招聘状态以企业官网为准。',
-        '采集依赖你自己已登录的浏览器，不破解签名、不绕登录，单页低频。',
-      ]
-      result.next = result.jd.available
-        ? '已拿到 JD；可继续用 career_jd_interview 生成面试题，或用 career_prep_resume 出简历。'
-        : '先把 JD 弄进岗位库（career_campus_portal → career_browser_capture，或直接粘贴 JD）。'
+      if(args.includeOffershow!==false){
+        result.offershow=await captureSite({site:'offershow',keyword:company,dryRun:true,limit:8,fillJd:false,useOpenTab:args.useOpenTab},{config,repos,panel,logger})
+        result.offershow.contentKind='recruitment-plan'
+        result.offershow.salaryVerified=false
+        result.offershow.publicSalaryHighlights=await fetchOfferShowSalaryHighlights({dataDir:config.dataDir,company})
+      }
+      result.caveats=['论坛内容为用户自述，官方JD与在招状态需独立核实。','搜索仅覆盖当前返回页；无匹配不等于全站没有。','小红书图文可能只有标签，未做OCR的图片/视频不作为已取得面经正文。','OfferShow校招计划不等于薪资爆料，薪资未核实会明确标注。']
       return result
     },
   }))
@@ -2287,6 +2226,7 @@ export function registerCareerTools(ctx, deps) {
     required: ['platform', 'content'],
     handler: (args) => {
       const post = repos.intel.addForumPost(args)
+      repos.knowledge.upsert({kind:'interview',title:args.title??'手动导入面经',company:args.company,role:args.jobTitle,platform:args.platform,url:args.url,body:args.content,completeness:'full',evidenceLevel:'C',sourceEntityType:'forum_post',sourceEntityId:post.id})
       if (post.duplicate) return { ok: true, duplicate: true, postId: post.id, note: '这条内容已入库（按内容哈希去重），不重复计入证据。' }
       const claims = Array.isArray(args.claims) ? args.claims : []
       const created = claims.map((c) => repos.intel.addClaim({
@@ -2459,7 +2399,7 @@ export function registerCareerTools(ctx, deps) {
   // ── applications ───────────────────────────────────────────────────────────
   add(makeTool({
     name: 'career_application_create',
-    description: '创建投递记录（状态默认 saved）。创建时会**冻结当时的 JD** 并记录提交材料快照，之后岗位被刷新或删除也不影响复盘。若同公司近期投过会给出冷冻期提醒。不会替你投递，只记录。',
+    description: '创建投递记录（状态默认 saved）。收藏时保留草稿，首次正式投递时冻结最终 JD、简历及资料内容，之后原材料变化不影响复盘。若同公司近期投过会给出冷冻期提醒。不会替你投递，只记录。',
     params: {
       jobId: S('岗位 id（推荐，会自动带公司/岗位名）'), companyName: S('公司名'), jobTitle: S('岗位名'),
       status: S(APPLICATION_STATUSES.join('|')), channel: S('投递渠道'), url: S('岗位链接'),
@@ -2482,7 +2422,7 @@ export function registerCareerTools(ctx, deps) {
         ok: true,
         application,
         hasJd: Boolean(application?.submitted_jd),
-        materialsSpecified: Boolean(application?.submission_snapshot?.materialsSpecified),
+        materialsSpecified: Boolean(application?.submissionSnapshot?.materialsSpecified),
         cooldown: cooldown?.blocked
           ? { warning: `近 ${cooldown.months} 个月内已投过「${cooldown.hits[0].company_name}」${cooldown.hits.length} 次，多数公司有 6 个月冷冻期，重复投递可能被直接筛掉。`, hits: cooldown.hits }
           : null,
@@ -2539,7 +2479,10 @@ export function registerCareerTools(ctx, deps) {
     params: {
       id: S('投递记录 id（必填）'), status: S(APPLICATION_STATUSES.join('|')),
       nextAction: S('下一步动作'), nextActionAt: S('下一步日期'), notes: S('备注'),
-      resumeVersionId: S('简历版本'), result: S('结果'), retro: S('复盘'), note: S('本次变更说明'), archived: B('归档'),
+      resumeVersionId: S('草稿使用的简历版本（已投递材料不能覆盖）'),
+      docIds: SA('草稿附带资料；首次正式投递时冻结，之后不能覆盖'),
+      snapshotNote: S('草稿材料备注'), jd: S('草稿JD原文'), jdUrl: S('草稿JD链接'),
+      result: S('结果'), retro: S('复盘'), note: S('本次变更说明'), archived: B('归档'),
     },
     required: ['id'],
     handler: (args) => ({ ok: true, application: repos.applications.update(String(args.id), args) }),

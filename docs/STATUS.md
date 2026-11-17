@@ -1,177 +1,58 @@
-# CareerOS 进度与功能清单
+# CareerOS 当前状态
 
-> 数据时点：2026-11-17。数字全部取自本机数据库与测试运行结果，不是估算。
-> 每次改动后应更新本页；**没验证过的写「未验证」，不写成「已完成」**。
+> 2026-11-17。区分“代码已实现”“离线回归通过”和“真实站点实测”，不以工具数量代替可用性。
 
-## 一、一句话现状
+## 当前实现
 
-一个装进 DSH 的 Cordis bundle：**78 个 Agent 工具 + 5 工作区求职面板（11 个页签全保留）+ 本地 SQLite 知识库**，
-从「发现岗位」到「定制简历」到「投递复盘」的链路已经跑通，并已用**字节跳动、腾讯两家真实校招站**端到端验证。
+- DSH Cordis bundle；Host 为原生 ESM，SQLite schema v14（分类知识库与原文版本）。
+- 84 个 Agent 工具；客户端 16 个分片生成一个 bundle。
+- 全量离线回归350项通过，另有五站真实浏览器验收与本机中文OCR测试；当前GUI视觉验证仍受环境限制。
+- 11 个页面按 5 组导航组织；这是导航分组，不是 5 个独立工作区。
+- 个人数据、浏览器 profile、校准日志和运行时依赖不入公开仓库。
 
-| 指标 | 值 |
+## 本轮整体链路修复
+
+| 环节 | 当前规则 |
 | --- | --- |
-| schema 版本 | **v13**（13 次迁移，append-only） |
-| Agent 工具 | **82 个** |
-| 测试 | **239 个全绿**，22 个套件 |
-| 面板 | 5 工作区 / 11 页签全保留，已进入 Web boot graph |
-| 运行时依赖 | **零外部依赖**（只用 `node:` 内置） |
-| 库内真实数据 | 21 个岗位 · 27 条岗位来源 · 52 条 JD 快照 · 8 次抓取记录 |
+| 数据源 | 6 张去重源卡片；BOSS/51job 等放在组内，分别有登录入口；手动导入不显示“需登录” |
+| 登录 | 本机独立浏览器 profile 跨重启保留，默认遵循系统代理；站点失效时仍需续期 |
+| 采集 | 响应完成即缓存；站点解析器验收，配置/SEO/登录响应不算搜索成功 |
+| 校招/社招/实习 | 显式类型或文本证据过滤；未知类型不默认社招，查询结果含推荐项时另做相关性过滤 |
+| JD | 预览和入库均可补正文；拒绝登录墙、错误页、空标题；保留原始要求字符串，额外结构化规则单独命名 |
+| 来源优先级 | 已有官方事实时，第三方只补空字段，不覆盖官方 JD/投递地址却保留官方在招状态 |
+| 去重 | 不同岗位编号不能因同名合并；共享列表 URL 不能串公司/串岗位 |
+| 抓取差异 | 范围一致且前后完整性已证实时才允许报告消失项；分页/截断/解析失败/未知完整性不判下架 |
+| 简历 | 从素材库选择与排序；缺口和质量诊断单列，不编造成果、数字、技能或录用概率 |
+| 正式投递 | 草稿材料可刷新；首次正式投递冻结最终 JD、简历原文/LaTeX/资料字段与哈希，随后不覆盖历史 |
+| 面试调研 | 真实用户自述、JD 推导练习、缺失证据分开；标题/标签/校招计划都不冒充面经正文或薪资 |
 
-## 二、已被真实数据验证的链路
+## 真实采集验收
 
-下面每条都跑过真实网络请求，不是设计稿。
+详细证据与限制见 [站点采集验收](SOURCES-RESEARCH.md)。本轮观察：
 
-### 1. 岗位发现（四条路，按可靠性排序）
+- BOSS：15 条列表，实习/校招条件均测过，已取职责与要求正文。
+- 51job：通过真实搜索框取到 20 条列表与 JD；校招筛出 4 条。也记录了输入框/渲染超时，尚不能保证每次稳定。
+- 小红书：两组关键词均返回 20 条；一篇文字面经 879 字可读，另一篇只有标签，不算已取正文。
+- OfferShow：腾讯/字节跳动搜索框分别返回 24/14 条校招计划；首页公开薪资摘要可读，不等于完整薪资库搜索。
 
-| 路径 | 实测证据 | 适用 |
-| --- | --- | --- |
-| 已知 ATS 公开 API | `api.lever.co/v0/postings/leverdemo` → 10 条岗位 | Lever / Greenhouse / Ashby / SmartRecruiters |
-| **专用浏览器 + CDP 自动抓** | 字节 10 条、腾讯 11 条（6 秋招 + 5 实习） | 大厂 SPA 校招站（需登录） |
-| 重放用户 cURL | `ats:lever` → 10 条岗位 | 只想粘一条命令、不想开浏览器 |
-| 手动粘贴 | 始终可用（兜底） | 无法自动化的平台 |
+以上为当时当前返回页，不是全站规模或长期可用性保证。测试岗位未擅自批量导入个人岗位库。
 
-### 2. 专用浏览器抓取（主力路径）
+## 验证命令
 
+```powershell
+npm test
+node scripts/build-client.mjs
+node --check client/index.cjs
+node scripts/verify-site-session.mjs boss 产品经理 intern
 ```
-career_campus_portal  {company:"腾讯"}
-  → 现场探测，返回 https://join.qq.com（HTTP 200 + 标题「首页 | 腾讯校招」）
-career_browser_login   {url:"https://join.qq.com"}
-  → 弹出独立 Edge 窗口，登录态存 data/browser-profile，一次登录长期有效
-career_browser_capture {url:"…", company:"腾讯", scope:"招聘类型=实习生", recruitType:"daily"}
-  → CDP 附着标签页 → 重载触发 XHR → 截响应 → 解析 → 入库 + JD 快照 + 抓取留痕
-```
 
-**实测拿到的真实接口**：
+全量测试包含临时数据库、来源保护、匹配缺口、JD 错误页、招聘类型、投递冻结及客户端渲染；不替代真实站点和当前 GUI 验证。
 
-| 公司 | 列表接口 | 响应结构 |
-| --- | --- | --- |
-| 字节跳动 | `GET /api/v1/search/job/posts?portal_type=3` | `data.job_post_list[]`，`count: 6559` |
-| 腾讯 | `GET /api/v1/position/searchPosition` | `data.positionList[]`，`count: 999` |
+## 仍有边界
 
-### 3. 7 天过期 + diff
-
-- `captureFreshness` 返回 `ageDays / stale / dueAt`，阈值 7 天
-- diff 基准是**上一次同范围抓取的岗位编号集合**（`seen_codes`），不是整个公司岗位库
-- 范围不同或没有基线时，**明确说「无法可靠判定下架」**，不编造下架数
-
-实测：字节第二次抓 `added 0 / removed 0 / unchanged 10`；腾讯实习生第二次抓 `added 0 / removed 0 / unchanged 5`。
-
-### 4. JD 落库（含详情接口补全）
-
-`jd_snapshot` 表每次抓取存一份（标题/地点/截止/描述/要求 + 内容哈希），
-可发现「同一岗位要求从本科改成硕士」。当前 **52+ 条快照**。
-
-**列表接口不给正文的站点会自动补**：腾讯 `searchPosition` 只返回标题/地点，
-正文要另调 `GET /api/v1/jobDetails/getJobDetailsByPostId?postId=…`。
-`career_browser_capture` 默认 `fillJd=true`，抓完列表立刻按 postId 逐条补正文；
-也可用 `career_job_jd_fetch` 批量补历史岗位。
-实测腾讯实习生 8 条全部补上（292/259/257/250/238/209/167/167 字）。
-
-### 5. 简历定向出稿
-
-`career_resume_build` 按岗位挑经历、排序、精简要点，且：
-- 章节顺序随岗位变（产品岗把实操放前面）
-- 从个人资料库按相关性挑证书，生成「证书与语言」小节
-- **缺口如实列出**（同义组只合并真正等价的：英语←TOEFL/IELTS/CET，大模型←LLM/VLM/LoRA）
-- LaTeX 编译：xelatex 实测 **1 页 PDF，2.7 秒**
-
-### 6. 投递管理
-
-`career_application_create` 冻结当时 JD + 材料快照；`career_funnel` 按「达到过的最高阶段」算转化率与卡点；
-`career_apply_card` 生成可复制的网申信息卡。实测信息卡 **16/26 字段自动填上**，缺的如实标空。
-
-## 三、功能清单
-
-### 画像与简历（21 个工具）
-
-| 能力 | 工具 | 状态 |
-| --- | --- | --- |
-| 画像读写 | `career_profile_get` / `career_profile_update` | ✅ |
-| 单份简历导入 | `career_resume_upload` / `career_resume_import` | ✅ PDF/DOCX/MD/TXT |
-| **批量导入一堆简历** | `career_resume_ingest` | ✅ 目录/多路径/粘文本，按内容指纹去重 |
-| 素材库合并去重 | `career_vault_snapshot` / `career_vault_plan_merge` / `career_vault_apply` | ✅ 要点级去重 + 冲突报出 |
-| 经历 CRUD | `career_experience_add/list/update` | ✅ |
-| 版本管理 | `career_resume_list/activate/delete/compare` | ✅ |
-| 定向出稿 | `career_resume_build` / `career_resume_tailor` | ✅ |
-| LaTeX | `career_resume_tex` / `career_resume_compile` | ✅ 本机 xelatex |
-| 匹配分析 | `career_resume_match` / `career_match_job` / `career_match_rank` | ✅ |
-
-### 个人资料库（4 个工具）
-
-| 能力 | 工具 | 状态 |
-| --- | --- | --- |
-| 批量存入证件/成绩/专利 | `career_doc_ingest` | ✅ 自动分类 + 抽分（托福/雅思/四六级/GPA） |
-| 列表 / 修改 / 按岗位提取 | `career_doc_list` / `career_doc_update` / `career_doc_for_job` | ✅ |
-
-> 注意：**默认资料库为空**（`personal_document = 0`），你的 TOEFL 105 目前只在经历正文里，
-> 还没作为「凭据」入库。传一次成绩单就能自动出现在「证书与语言」。
-
-### 岗位发现与采集（13 个工具）
-
-| 能力 | 工具 | 状态 |
-| --- | --- | --- |
-| 校招地址（现场探测） | `career_campus_portal` | ✅ 内置 15 家 |
-| 专用浏览器登录 | `career_browser_login` / `career_browser_close` | ✅ |
-| CDP 自动抓取 | `career_browser_capture` | ✅ 支持 `useOpenTab` |
-| cURL 重放 | `career_jobs_from_curl` | ✅ 含 SSRF 防护 |
-| HTML 抓取 | `career_jobs_crawl` | ✅ ATS/JSON-LD/内嵌 JSON/链接聚类 |
-| 增量检查 | `career_jobs_sync` | ✅ |
-| 抓取状态 / 7 天过期 | `career_capture_status` | ✅ |
-| 取数指引 | `career_source_guide` | ✅ |
-| 岗位 CRUD / 核验 | `career_job_save/get/search/delete/verify` | ✅ |
-| 状态核验 | 官方来源才能改 OPEN/CLOSED | ✅ |
-
-### 公司与行业情报（9 个工具）
-
-`career_company_upsert/get` · `career_industry_upsert/list` · `career_unit_upsert`（部门核心度）·
-`career_outlook_add`（前景信号，必须带来源+日期+证据等级）· `career_bar_analyze`（门槛分层 A/B/C/D/U）·
-`career_research_save` · `career_evidence_add` · `career_forum_import`
-
-### 投递管理（10 个工具）
-
-`career_application_create/update/delete` · `career_applications_list/export` · `career_application_board` ·
-`career_funnel` · `career_apply_card` · `career_digest` · `career_feedback`
-
-### 计划与面试（6 个工具）
-
-`career_plan`（时间线+动作清单）· `career_plan_brief`（9 节综合简报）· `career_event_add`（公司级节点）·
-`career_interview_prep` · `career_social_queries` · `career_monitor_create/run` · `career_notifications`
-
-### 系统（5 个工具）
-
-`career_status` · `career_selfcheck`（环境自检）· `career_runtime_setup`（装 PDF 依赖）·
-`career_panel`（面板跳转）· `career_export`
-
-## 四、库内真实数据（2026-11-17）
-
-| 表 | 条数 | 说明 |
-| --- | --- | --- |
-| `job` | 21 | 字节 10（7 未标批次 + 3 daily）、腾讯 11（6 autumn_campus + 5 daily） |
-| `job_source` | 27 | 每条岗位的来源证据（类型/链接/时间/摘录/可信度） |
-| `company` | 4 | 字节跳动、腾讯等 |
-| `jd_snapshot` | 52 | 每次抓取的 JD 全文快照 |
-| `company_capture` | 8 | 抓取留痕（含 seen_codes 基线） |
-| `resume_version` | 2 | 你的原始简历 + 产品市场方向改写稿 |
-| `resume_experience` | 6 | 东南大学 / 华侨大学 / MSRA-ELVIS / 厦门实验室 / 闲鱼 / 专利语言 |
-| `personal_document` | 0 | **空，待你上传成绩单等凭据** |
-| `application` | 0 | 还没投递 |
-
-## 五、已知限制（不是 bug，是边界）
-
-| 限制 | 说明 |
-| --- | --- |
-| DSH 内置浏览器不可用 | 沙箱 webview，`DesktopBrowserBridge` 只开 `acquire/release/onOpenRequested`，插件读不到页面。必须用专用浏览器 |
-| 腾讯详情页 URL 未渲染验证 | `post.html?id=21417` 返回 200 且是岗位投递页，但没验证渲染出的是否就是该岗位 |
-| 列表只抓到首页 10~20 条 | 字节 `count: 6559`，一次只取 `limit=10`。要更多需加滚动翻页或多响应合并 |
-| 招聘时间线未做 | JD 里有零散日期，但没抽成结构化节点（网申开始/截止/笔试/面试） |
-| 图片型证件不做 OCR | 扫描件只登记文件，字段需手工补 |
-| 通用 PDF 解析器读学术型 CV 会错 | 你的简历 `major` 被读成「客户关系」；所以结构化为人工合并，原文永存 |
-| Workday 接口未用真实 tenant 验证 | 代码路径在，但没跑通实例 |
-
-## 六、下一步候选
-
-1. **给 8 条日常实习跑匹配排序** → `career_match_rank`，看哪几条值得投
-2. **补资料库**（上传 TOEFL / 成绩单）→ 网申信息卡从 16/26 涨到 23/26
-3. **加滚动翻页** → 把字节 6559 条缩到你的筛选范围后全量拿
-4. **做招聘时间线** → 从 JD + 页面的招聘流程页抽结构化节点
-5. **腾讯详情页 URL 确认** → 你点一个链接，我按实际路由改模板
+1. 全分页、全城市、每次渲染稳定性尚未全面验收；抓到首页不能声称全部抓完。
+2. OfferShow 完整薪资库/会员内容未打通，不绕过权限；数值无单位时保留原文。
+3. 小红书图片已接入本地OCR并真实测试，默认待人工核对；视频未解析，只有标签时不能生成“真实面试题”。
+4. 简历附件二进制不作为本轮快照承诺；冻结范围明确为数据库中的文本与元数据，源文件缺内容会告警。
+5. 本轮没有变更个人画像，也没有真实投递、发信或联系招聘者。
+6. 客户端构建和渲染回归通过不证明当前 GUI 已刷新；以实际刷新后的页面为准。
