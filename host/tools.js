@@ -800,7 +800,12 @@ export function registerCareerTools(ctx, deps) {
       const limit = Math.min(Number(args.limit ?? 200), 1000)
       const company = str(args.company, 200) ?? null
       const normalized = postings.slice(0, limit).map((posting) => postingToJob(posting, { company, pageUrl: sourceUrl }))
-      const withCompany = normalized.filter((job) => job.title)
+      // 调用方显式给了批次就以它为准（用户就是按这个筛选抓的），
+      // 不能让正文里的一句「2027校园招聘」把实习生岗位标成秋招。
+      const explicitRecruitType = str(args.recruitType, 40) ?? null
+      const withCompany = normalized
+        .filter((job) => job.title)
+        .map((job) => ({ ...job, recruitType: explicitRecruitType ?? job.recruitType ?? null }))
       const preview = withCompany.slice(0, 60).map((job) => ({
         title: job.title, company: job.company, location: job.location,
         recruitType: job.recruitType, applyUrl: job.applyUrl, deadline: job.deadline,
@@ -828,18 +833,30 @@ export function registerCareerTools(ctx, deps) {
       })
       panel.publish({ kind: 'jobs' })
 
-      // 两次抓取的集合差异：新增 / 下架（范围一致时才算）
+      // 两次抓取的集合差异：新增 / 下架。
+      // 基准是「上一次同范围抓取看到的编号集合」，不是整个公司岗位库——
+      // 否则换个筛选范围再抓，就会把别的批次的岗位全报成下架。
       const batchRows = normalized.map((job, index) => ({
         jobCode: job.jobCode ?? postings[index]?.jobCode ?? null,
         title: job.title,
         location: job.location,
       }))
-      const setDiff = diffCaptures({
-        previous: beforeJobs.map((row) => ({ ...row, companyKey: ckey })),
-        current: batchRows.map((row) => ({ ...row, companyKey: ckey })),
-        previousScopeKey: previousCapture?.scope_key ?? scopeKey,
-        currentScopeKey: scopeKey,
-      })
+      const prevCodes = Array.isArray(previousCapture?.seenCodes) ? previousCapture.seenCodes : null
+      const hasBaseline = Boolean(previousCapture && prevCodes)
+      const prevRows = hasBaseline
+        ? prevCodes.map((code) => {
+          const hit = beforeJobs.find((row) => String(row.jobCode) === String(code))
+          return { jobCode: code, title: hit?.title ?? '', location: hit?.location ?? '', companyKey: ckey }
+        })
+        : []
+      const setDiff = hasBaseline
+        ? diffCaptures({
+          previous: prevRows,
+          current: batchRows.map((row) => ({ ...row, companyKey: ckey })),
+          previousScopeKey: previousCapture.scope_key,
+          currentScopeKey: scopeKey,
+        })
+        : null
 
       // JD 快照：先取旧值做内容比对，再写新值
       let jdChanges = []
@@ -867,6 +884,7 @@ export function registerCareerTools(ctx, deps) {
           found: postings.length,
           created: imported.created.length,
           merged: imported.merged.length,
+          seenCodes: batchRows.map((row) => row.jobCode).filter(Boolean),
           stats: { strategy, parsed: withCompany.length, jdSnapshots: savedSnapshots },
           note: 'career_browser_capture',
         })
@@ -888,20 +906,30 @@ export function registerCareerTools(ctx, deps) {
           previousScope: previousCapture?.scope ?? null,
           ...freshness,
         },
-        diff: {
-          added: setDiff.added.slice(0, 40),
-          removed: setDiff.removed.slice(0, 40),
-          addedCount: setDiff.added.length,
-          removedCount: setDiff.removed.length,
-          unchanged: setDiff.unchanged,
-          scopesComparable: setDiff.scopesComparable,
-          caveat: setDiff.caveat,
-        },
+        diff: setDiff
+          ? {
+            added: setDiff.added.slice(0, 40),
+            removed: setDiff.removed.slice(0, 40),
+            addedCount: setDiff.added.length,
+            removedCount: setDiff.removed.length,
+            unchanged: setDiff.unchanged,
+            scopesComparable: setDiff.scopesComparable,
+            caveat: setDiff.caveat,
+          }
+          : {
+            addedCount: 0,
+            removedCount: 0,
+            seenCount: batchRows.length,
+            scopesComparable: false,
+            caveat: previousCapture
+              ? `上次抓取（范围「${previousCapture.scope ?? '全部'}」）没有记录岗位编号明细，无法可靠判定下架；本次看到 ${batchRows.length} 条并已建立基线，下次抓取就能报新增/下架。`
+              : `这是「${args.scope ?? '全部'}」范围的首次抓取，本次看到 ${batchRows.length} 条并已建立基线，下次再抓就能报新增/下架。`,
+          },
         jdChanges: jdChanges.slice(0, 30),
         jdSnapshotsSaved: savedSnapshots,
-        next: setDiff.added.length || setDiff.removed.length
+        next: setDiff && (setDiff.added.length || setDiff.removed.length)
           ? `本次变化：新增 ${setDiff.added.length} 条、下架 ${setDiff.removed.length} 条。可以让我针对新增岗位做匹配排序。`
-          : '与上次相比没有变化。',
+          : (setDiff ? '与上次相比没有变化。' : '已建立该范围的抓取基线，7 天后或下次重抓可看到变化。'),
         note: '来源记为「专用浏览器自动捕获」，状态 UNVERIFIED（不是官网页面直采）；需要时可 career_job_verify 升级。',
       }
     },

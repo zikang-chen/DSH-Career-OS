@@ -2,7 +2,7 @@
 // and is recorded in `schema_migrations`. Never edit an applied migration — append a
 // new one instead, so existing databases keep their history and user data.
 
-export const SCHEMA_VERSION = 10
+export const SCHEMA_VERSION = 11
 
 /**
  * @type {Array<{version:number,name:string,sql:string}>}
@@ -685,6 +685,16 @@ CREATE TABLE jd_snapshot (
 );
 CREATE INDEX idx_jd_job ON jd_snapshot(job_id, captured_at DESC);
 CREATE INDEX idx_jd_company ON jd_snapshot(company_key, captured_at DESC);
+`,
+  },
+  {
+    version: 11,
+    name: 'capture-seen-codes',
+    // 「下架」只能跟「上一次同范围抓取看到的那批」比。
+    // 之前拿整个公司岗位库当基准，换个筛选范围再抓就会把别的批次的岗位全报成下架。
+    // 这里把每轮看到的岗位编号存下来，diff 才有正确基准。
+    sql: `
+ALTER TABLE company_capture ADD COLUMN seen_codes TEXT;
 `,
   },
 ]

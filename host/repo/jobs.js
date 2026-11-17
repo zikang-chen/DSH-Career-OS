@@ -332,7 +332,10 @@ export class JobRepo {
           ...posting,
           company: posting.company ?? company,
           applyUrl: posting.applyUrl ?? posting.url ?? pageUrl,
-          recruitType: posting.recruitType ?? recruitType ?? null,
+          // 调用方显式给的批次最可信（用户就是按这个筛选抓的），
+          // 其次才用逐条从正文猜出来的结果——否则正文里一句「2027校园招聘」
+          // 就能把实习生岗位标成秋招。
+          recruitType: recruitType ?? posting.recruitType ?? null,
           location: posting.location ?? null,
         }
         if (!payload.company) throw new Error('缺少公司名')

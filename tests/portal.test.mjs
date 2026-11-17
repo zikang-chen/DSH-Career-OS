@@ -178,6 +178,25 @@ describe('capture repo', () => {
     }
   })
 
+  it('records the set of job codes each run saw, so the next diff has a correct baseline', () => {
+    const env = makeEnv()
+    try {
+      env.repos.captures.record({
+        companyKey: '腾讯', companyName: '腾讯', scope: '招聘类型=实习生', scopeKey: '招聘类型=实习生',
+        found: 2, seenCodes: ['21417', '21415', '21417'],
+      })
+      const latest = env.repos.captures.latest('腾讯', '招聘类型=实习生')
+      assert.deepEqual(latest.seenCodes, ['21417', '21415'], 'deduped and stored')
+      // 别的范围看不到这批的基线，这正是「不能拿整个公司岗位库当基准」的原因
+      assert.equal(env.repos.captures.latest('腾讯', 'all'), null)
+
+      env.repos.captures.record({ companyKey: '腾讯', companyName: '腾讯', scopeKey: 'all', found: 6 })
+      assert.equal(env.repos.captures.latest('腾讯', 'all').seenCodes, null, 'old-style run without codes stays null')
+    } finally {
+      env.cleanup()
+    }
+  })
+
   it('maps captured job codes back to stored job ids', () => {
     const env = makeEnv()
     try {
