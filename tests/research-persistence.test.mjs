@@ -1,0 +1,9 @@
+import assert from'node:assert/strict'
+import{it}from'node:test'
+import{makeEnv}from'./helpers.mjs'
+import{createResearchTasks}from'../host/research-tasks.js'
+import{durableResearchResult,resultSnapshot}from'../host/research-result.js'
+const flush=()=>new Promise(r=>setImmediate(r))
+it('restores completed preview after a new manager and avoids a repeated network call',async()=>{const e=makeEnv();try{let calls=0;const deps={repos:e.repos,config:{dataDir:e.dir}},capture=async()=>{calls++;return {ok:true,found:1,preview:[{title:'岗位',url:'https://example.com/job?securityId=secret&jobid=1'}]}};const a=createResearchTasks(deps,{capture});const first=a.start({site:'boss',keyword:'产品',dryRun:true});await flush();const b=createResearchTasks(deps,{capture});const restored=b.get(first.id);assert.equal(restored.result.found,1);assert.ok(!restored.result.preview[0].url.includes('secret'));const next=b.start({site:'boss',keyword:'产品',dryRun:true});assert.equal(next.cacheHit,true);assert.equal(calls,1);assert.equal(b.list().items[0].resultAvailable,true)}finally{e.cleanup()}})
+it('does not use preview cache as authorization to import',async()=>{const e=makeEnv();try{let calls=0;const tasks=createResearchTasks({repos:e.repos,config:{dataDir:e.dir}},{capture:async()=>{calls++;return{ok:true}}});tasks.start({site:'boss',keyword:'产品',dryRun:true});await flush();tasks.start({site:'boss',keyword:'产品',dryRun:false});await flush();assert.equal(calls,2)}finally{e.cleanup()}})
+it('redacts credential fields and caps durable result size',()=>{const r=durableResearchResult({cookie:'secret',items:[{securityId:'secret',url:'https://a.test/x?token=secret&id=2'}]});assert.ok(!JSON.stringify(r).includes('secret'));assert.ok(r.items[0].url.includes('id=2'));assert.equal(resultSnapshot({text:'x'.repeat(500)},{maxBytes:50}).result,null)})

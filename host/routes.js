@@ -323,6 +323,7 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
 
   route('POST', '/site/capture', ({ body }) => captureSite(body, { config, repos, panel, logger }))
   route('POST', '/research/start', ({body}) => researchTasks.start(body))
+  route('GET', '/research/tasks', ({query}) => researchTasks.list({limit:query.get('limit')}))
   route('GET', '/research/task', ({query}) => researchTasks.get(String(query.get('id'))))
   route('POST', '/research/cancel', ({body}) => researchTasks.cancel(String(body.id)))
 

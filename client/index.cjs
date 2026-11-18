@@ -1283,6 +1283,12 @@ function KnowledgeLink({ url, children }) {
   const safe = knowledgeHttp(url)
   return safe ? h('a', { href: safe, target: '_blank', rel: 'noopener noreferrer', style: { ...S.muted, color: T.accent, overflowWrap: 'anywhere' } }, children || safe) : null
 }
+function ResearchHistory() {
+ const history=useApi('/research/tasks?limit=10')
+ const [result,setResult]=useState(null),[error,setError]=useState(null)
+ const open=async id=>{try{const task=await apiGet(`/research/task?id=${encodeURIComponent(id)}`);setResult(task);setError(null)}catch(e){setError(e.message)}}
+ return h('details',{style:S.cardTight},h('summary',{style:{...S.h3,cursor:'pointer'}},'最近研究结果（重启后可查看，不自动重跑）'),h(Btn,{onClick:history.reload},'刷新任务记录'),history.loading?h(Loading):history.error?h(ErrorBox,{error:history.error,onRetry:history.reload}):(history.data?.items||[]).map(t=>h('div',{key:t.id,style:{...S.row,flexWrap:'wrap',justifyContent:'space-between',padding:8}},h('span',{style:S.muted},`${t.site||'站点'} · ${t.keyword||'未标注关键词'} · ${{running:'执行中',ok:'已完成',error:'失败/中断',cancelled:'已取消'}[t.status]||t.status}`),h(Btn,{onClick:()=>open(t.id)},t.resultAvailable?'查看保存结果':'查看状态'))),error?h('div',{style:S.muted},error):null,result?h('div',{style:S.cardTight},h('div',{style:S.h3},result.result?'已保存的采集结果':'运行状态'),h('div',{style:S.muted},result.resultNote||result.error||`返回 ${result.result?.found??0} 条，详情 ${result.result?.jdFilled??0} 条；保存结果已移除会话票据，不代表重新核验`),(result.result?.preview||[]).slice(0,10).map((r,i)=>h('div',{key:i,style:{...S.body,padding:6}},r.title||'未命名资料',h('div',{style:S.muted},knowledgeText(r.description||r.desc||r.requirements).slice(0,300))))):null)
+}
 function KnowledgeCapture({ onImported }) {
   const [form, setForm] = useState({ site: 'xhs', keyword: '', recruitType: '', limit: 20, autoOcr: false })
   const [result, setResult] = useState(null)
@@ -1328,6 +1334,7 @@ function KnowledgeCapture({ onImported }) {
   }
   const failures = result ? [...(result.warnings || []), ...(result.jdFailures || []).map(x => `JD：${x.title || ''} ${x.error || ''}`), ...(result.bodyFailures || []).map(x => `正文：${x.title || ''} ${x.error || ''}`), ...(result.ocrFailures||[]).map(x=>`图片识别：${x.title||''} 第${x.index}张 ${x.error||''}`), ...(result.failed || []).map(knowledgeText), ...(result.gaps || []).map(knowledgeText)] : []
   return h('div', { style: S.col },
+    h(ResearchHistory),
     h('div', { style: S.muted }, '先预览，再由你确认入库。仅采集当前返回范围；需在「设置 → 数据源」登录支持站点并人工完成验证。不会绕过访问控制。OfferShow 是校招计划线索，不是薪资或官方在招证明。'),
     h('div', { style: knowledgeGrid(160) },
       h(Field, { label: '采集站点' }, h('select', { style: S.input, value: form.site, onChange: set('site'), disabled: busy }, Object.entries({ xhs: '小红书 · 笔记', nowcoder: '牛客 · 面经', boss: 'BOSS · 岗位', '51job': '前程无忧 · 岗位', offershow: 'OfferShow · 校招计划' }).map(([v, label]) => h('option', { key: v, value: v }, label)))),
