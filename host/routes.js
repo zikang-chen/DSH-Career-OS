@@ -26,12 +26,13 @@ import {buildToday,updateTodayTask} from './today.js'
 import {createResearchTasks} from './research-tasks.js'
 import {withJobListEvidence} from './job-list-evidence.js'
 import {buildCompanyView} from './company-view.js'
+import {buildIndustryResearchPlan, collectIndustrySnippets, renderIndustryResearchNote} from './industry-research.js'
 import { capturePageJson, openForLogin } from './browser.js'
 import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
 import { parsePastedJob } from './sources.js'
 import { sha1ish } from './util.js'
-import { nowIso, str } from './util.js'
+import { nowIso, parseJson, str } from './util.js'
 
 export const API_PREFIX = '/plugins/dsh-career/api'
 
@@ -254,6 +255,34 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
     const industry = repos.intel.getIndustry(query.get('id'))
     if (!industry) throw new HttpError('行业不存在', 404)
     return { ok: true, industry }
+  })
+
+  // Bounded industry research: a plan, then at most 3 public searches saved as sourced leads.
+  route('GET', '/industry/plan', ({ query }) => {
+    const industry = repos.intel.getIndustry(query.get('id'))
+    if (!industry) throw new HttpError('行业不存在', 404)
+    const companies = repos.db.all('SELECT id, name FROM company WHERE industry_id = ? LIMIT 20', [industry.id])
+    const jobs = companies.length
+      ? repos.db.all(`SELECT title, skills FROM job WHERE company_id IN (${companies.map(() => '?').join(',')}) LIMIT 100`, companies.map((c) => c.id))
+      : []
+    return buildIndustryResearchPlan({ industry, companies, jobs: jobs.map((j) => ({ ...j, skills: parseJson(j.skills, []) })) })
+  })
+
+  route('POST', '/industry/research', async ({ body }) => {
+    const industry = repos.intel.getIndustry(String(body.id))
+    if (!industry) throw new HttpError('行业不存在', 404)
+    const companies = repos.db.all('SELECT id, name FROM company WHERE industry_id = ? LIMIT 20', [industry.id])
+    const plan = buildIndustryResearchPlan({ industry, companies, jobs: [] })
+    const collected = await collectIndustrySnippets({ name: industry.name, queries: body.queries ?? plan.queries, search, maxQueries: body.maxQueries })
+    if (collected.ok === false && !collected.resultCount) return { ok: false, error: collected.error ?? '未检索到可用结果', collected }
+    const report = repos.intel.saveReport({
+      kind: 'industry', industryId: industry.id, title: `${industry.name} · 公开检索线索`,
+      body: renderIndustryResearchNote({ name: industry.name, collected }),
+      sources: collected.queries.flatMap((g) => g.sources.map((s) => s.url)).filter(Boolean).slice(0, 30),
+      dataAsOf: new Date().toISOString().slice(0, 10),
+    })
+    panel.publish({ kind: 'reports', id: report.id })
+    return { ok: true, report, collected, note: '已保存检索线索（含来源与日期）；这些是待核实线索，不是行业结论。' }
   })
 
   route('GET', '/reports', ({ query }) => ({ ok: true, reports: repos.intel.listReports({ kind: query.get('kind') ?? undefined, companyId: query.get('companyId') ?? undefined, industryId: query.get('industryId') ?? undefined }) }))

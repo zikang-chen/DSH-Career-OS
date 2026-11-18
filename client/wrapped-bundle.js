@@ -1190,6 +1190,9 @@ function IndustryTab() {
   const [detail, setDetail] = useState(null)
   const [form, setForm] = useState({ name: '', summary: '' })
   const [error, setError] = useState(null)
+  const [notice, setNotice] = useState(null)
+  const [researching, setResearching] = useState(false)
+  const [plan, setPlan] = useState(null)
 
   const load = useCallback(() => {
     apiGet('/industries').then((res) => setIndustries(res.industries)).catch((err) => setError(err.message))
@@ -1198,7 +1201,20 @@ function IndustryTab() {
 
   const open = (id) => {
     setSelected(id)
+    setPlan(null)
+    setNotice(null)
     apiGet(`/industry?id=${encodeURIComponent(id)}`).then((res) => setDetail(res.industry)).catch((err) => setError(err.message))
+  }
+
+  const previewPlan = (id) => apiGet(`/industry/plan?id=${encodeURIComponent(id)}`)
+    .then((res) => { setPlan(res); setNotice(null) }).catch((err) => setError(err.message))
+
+  const runResearch = (id) => {
+    setResearching(true); setError(null); setNotice(null)
+    apiPost('/industry/research', { id })
+      .then((res) => { setNotice(res.note ?? '已保存检索线索'); setPlan(res.collected ?? plan); open(id) })
+      .catch((err) => setError(`检索未完成：${err.message}；没有生成未经核实的结论。`))
+      .finally(() => setResearching(false))
   }
 
   return h('div', { style: S.col },
@@ -1214,7 +1230,10 @@ function IndustryTab() {
       h('div', { style: S.card },
         h('div', { style: S.h2 }, `行业目录（${industries?.length ?? 0}）`),
         industries === null ? h(Loading) : industries.length === 0
-          ? h(Empty, { title: '还没有行业档案', hint: '让 Agent 用 career_industry_upsert / career_research_save 生成研究简报后会出现在这里。' })
+          ? h('div', { style: S.col },
+            h(Empty, { title: '还没有行业档案', hint: '先建一个行业（如「人工智能」），再执行有次数上限的公开检索，结果按来源与日期保存为待核实线索。' }),
+            h('div', { style: S.row, flexWrap: 'wrap' },
+              ['人工智能', '半导体', '互联网人力资源'].map((name) => h(Btn, { key: name, onClick: () => apiPost('/industry', { name }).then((res) => { load(); return res }).then((res) => { if (res?.industry?.id) open(res.industry.id) }).catch((err) => setError(err.message)) }, `创建「${name}」`))))
           : h('div', { style: S.col }, industries.map((ind) => h('div', {
             key: ind.id, onClick: () => open(ind.id), style: { ...S.cardTight, cursor: 'pointer', borderColor: selected === ind.id ? T.accent : T.border },
           },
@@ -1225,11 +1244,23 @@ function IndustryTab() {
           ? h('div', { style: S.col },
             h('div', { style: S.h2 }, detail.name),
             detail.summary ? h('div', { style: { ...S.body, whiteSpace: 'pre-wrap' } }, detail.summary) : h('div', { style: S.muted }, '暂无摘要'),
+            h('div', { style: { ...S.cardTight, marginTop: 8, borderColor: T.accent } },
+              h('div', { style: S.h3 }, '研究这个行业（有限公开检索）'),
+              h('div', { style: { ...S.muted, marginBottom: 6 } }, '最多 3 个关键词、每个取少量结果；保存标题、链接与日期。数字与结论需回到原文核实，搜不到就留空。'),
+              h('div', { style: S.row, flexWrap: 'wrap' },
+                h(Btn, { onClick: () => previewPlan(detail.id) }, '查看检索计划'),
+                h(Btn, { kind: 'primary', disabled: researching, onClick: () => runResearch(detail.id) }, researching ? '检索中…' : '执行检索并保存线索')),
+              plan?.queries?.length
+                ? h('div', { style: { marginTop: 8 } },
+                  (plan.queries || []).map((q, i) => h('div', { key: i, style: S.muted }, `· ${typeof q === 'string' ? q : q.query}${q.ok === false ? `（失败：${q.error ?? '未知'}）` : ''}`)),
+                  plan.caveats ? plan.caveats.map((c, i) => h('div', { key: `c${i}`, style: { ...S.muted, fontSize: 11 } }, c)) : null)
+                : null,
+              notice ? h('div', { role: 'status', style: { ...S.muted, color: T.success, marginTop: 6 } }, notice) : null),
             detail.companies?.length ? h('div', null, h('div', { style: S.h3 }, '相关公司'),
               detail.companies.map((c) => h('div', { key: c.id, style: { ...S.muted } }, c.name))) : null,
             detail.reports?.length ? h('div', null, h('div', { style: S.h3 }, '研究简报'),
               detail.reports.map((r) => h('div', { key: r.id, style: { ...S.muted } }, `${r.title} · v${r.version} · ${fmtDate(r.updated_at)}`))) : null)
-          : h(Empty, { title: '选择左侧行业', hint: '行业档案包含产业链、格局、驱动因素与职业路径（由 Agent 研究后写入）。' })))
+          : h(Empty, { title: '选择左侧行业', hint: '行业档案汇总公司与研究线索；研究入口有次数上限，结果标来源与日期，不把检索摘要当结论。' })))
   )
 }
 
