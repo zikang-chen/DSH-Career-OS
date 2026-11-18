@@ -134,6 +134,7 @@ function SocialTab({ onNavigate } = {}) {
   const [updateError, setUpdateError] = useState(null)
   const [deleting, setDeleting] = useState(false)
   const [confirmId, setConfirmId] = useState(null)
+  const [cascade, setCascade] = useState({ source: false, media: false })
   const params = new URLSearchParams({ ...filters, offset: String(offset), limit: '20' }).toString()
   const list = useApi(`/knowledge?${params}`, [revision])
   const detail = useApi(detailId ? `/knowledge/item?id=${encodeURIComponent(detailId)}` : '/knowledge?limit=20', [revision])
@@ -145,15 +146,21 @@ function SocialTab({ onNavigate } = {}) {
     try { await apiPost('/knowledge/update', { id: detailId, status }); refresh() }
     catch (err) { setUpdateError(err.message) } finally { setSaving(false) }
   }
-  // Two-step: first click arms, second click deletes. Server keeps an audit row; source job/post stays.
+  // Two-step: first click arms, second click deletes. Server keeps an audit row.
+  // 连带删除（来源岗位/面经原文、本机图片）只对当前打开的那条生效，需显式勾选。
   const removeItem = async id => {
     if (confirmId !== id) { setConfirmId(id); setUpdateError(null); return }
+    const scoped = id === detailId
     setDeleting(true); setUpdateError(null)
     try {
-      const res = await apiPost('/knowledge/delete', { id })
+      const res = await apiPost('/knowledge/delete', {
+        id,
+        deleteSource: scoped && cascade.source === true,
+        deleteMedia: scoped && cascade.media === true,
+      })
       if (detailId === id) { setDetailId(null) }
-      setConfirmId(null); refresh()
-      if (res?.note) setUpdateError(res.note)
+      setConfirmId(null); setCascade({ source: false, media: false }); refresh()
+      if (res?.note) setUpdateError([res.note, res.source?.note, res.media?.note].filter(Boolean).join(' '))
     } catch (err) { setUpdateError(`删除失败：${err.message}`); setConfirmId(null) } finally { setDeleting(false) }
   }
   const media = item?.media
@@ -175,7 +182,7 @@ function SocialTab({ onNavigate } = {}) {
       h('div', { style: S.muted }, [entry.company, entry.role, entry.platform, fmtDate(entry.publishedAt)].filter(Boolean).join(' · ')),
       h('div', { style: { ...S.muted, margin: '8px 0', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } }, knowledgeText(entry.summary || entry.body || '暂无摘要，请打开原文核对。').slice(0, 220)),
       h('div', { style: S.muted }, `文字完整度：${KNOWLEDGE_COMPLETENESS[entry.completeness] || '未评估'} · 图片 ${(entry.media||[]).length} 张 / 待核对 ${(entry.media||[]).filter(m=>m.ocrStatus!=='reviewed').length} 张`),
-      h('div', { style: { ...S.row, marginTop: 10 } }, h(Btn, { onClick: () => { setDetailId(entry.id); setUpdateError(null); setConfirmId(null) } }, '打开原文与来源'), h(KnowledgeLink, { url: entry.url }, '原始链接'), h(Btn, { disabled: deleting, onClick: () => removeItem(entry.id) }, confirmId === entry.id ? '再次点击确认删除' : '删除'))))),
+      h('div', { style: { ...S.row, marginTop: 10 } }, h(Btn, { onClick: () => { setDetailId(entry.id); setUpdateError(null); setConfirmId(null); setCascade({ source: false, media: false }) } }, '打开原文与来源'), h(KnowledgeLink, { url: entry.url }, '原始链接'), h(Btn, { disabled: deleting, onClick: () => removeItem(entry.id) }, confirmId === entry.id ? '再次点击确认删除' : '删除'))))),
     h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap' } }, h(Btn, { disabled: offset === 0 || list.loading, onClick: () => setOffset(Math.max(0, offset - 20)) }, '上一页'), h('span', { style: S.muted }, `第 ${Math.floor(offset / 20) + 1} 页`), h(Btn, { disabled: list.loading || offset + 20 >= (list.data?.total || 0), onClick: () => setOffset(offset + 20) }, '下一页')),
     h('div',{style:S.card},h('div',{style:S.h2},'① 收集资料 → ② 确认入库 → ③ 分类与读图校正'),h(KnowledgeCapture,{onImported:refresh})),
     panel('手工导入经验 / 招聘 Bar / 搜索线索', h(SocialLegacyTools, { onImported: refresh })),
@@ -194,7 +201,15 @@ function SocialTab({ onNavigate } = {}) {
         updateError ? h('div', { role: 'alert', style: { ...S.muted, color: T.error } }, updateError) : null,
         h('div', { style: { ...S.row, flexWrap: 'wrap' } }, h(Btn, { disabled: saving, onClick: () => updateStatus(item.status === 'archived' ? 'active' : 'archived') }, saving ? '更新中…' : item.status === 'archived' ? '恢复为在用' : '归档资料'), item.status === 'inbox' ? h(Btn, { disabled: saving, onClick: () => updateStatus('active') }, '标记为在用') : null,
           h(Btn, { disabled: deleting, onClick: () => removeItem(item.id) }, deleting ? '删除中…' : confirmId === item.id ? '再次点击确认删除' : '删除资料')),
-        confirmId === item.id ? h('div', { style: { ...S.muted, color: T.warn } }, '确认后删除该条目及其历史修订，不可撤销；删除记录会留审计，关联的岗位/面经原文与已下载图片不会被删除。') : null) : h(Empty, { title: '资料不存在或已不可用' })) : null)
+        confirmId === item.id ? h('div', { style: { ...S.cardTight, borderColor: T.warn } },
+          h('div', { style: { ...S.muted, color: T.warn } }, '确认后删除该条目及其历史修订，不可撤销；删除记录会留审计。'),
+          item.sourceEntityType ? h('label', { style: { ...S.row, ...S.muted, cursor: 'pointer' } },
+            h('input', { type: 'checkbox', checked: cascade.source, onChange: (e) => setCascade({ ...cascade, source: e.target.checked }) }),
+            `同时删除关联${item.sourceEntityType === 'job' ? '岗位（含来源/状态历史/匹配）' : item.sourceEntityType === 'forum_post' ? '面经原文记录（含其观点）' : `来源记录（${item.sourceEntityType}）`}`) : null,
+          mediaItems.some((m) => typeof m === 'object' && m?.filePath) ? h('label', { style: { ...S.row, ...S.muted, cursor: 'pointer' } },
+            h('input', { type: 'checkbox', checked: cascade.media, onChange: (e) => setCascade({ ...cascade, media: e.target.checked }) }),
+            '同时删除本机已下载的图片文件') : null,
+          h('div', { style: { ...S.muted, fontSize: 11 } }, '不勾选则只删这条知识库条目，来源与图片文件保留。')) : null) : h(Empty, { title: '资料不存在或已不可用' })) : null)
 }
 
 function SocialLegacyTools({ onImported }) {

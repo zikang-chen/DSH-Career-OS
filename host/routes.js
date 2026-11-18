@@ -30,6 +30,7 @@ import {buildIndustryResearchPlan, collectIndustrySnippets, renderIndustryResear
 import {buildApplicationCalendar} from './application-calendar.js'
 import {compareJobs} from './job-compare.js'
 import {aggregateClaims} from './claim-aggregate.js'
+import {deleteKnowledgeCascade} from './knowledge-delete.js'
 import { capturePageJson, openForLogin } from './browser.js'
 import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
@@ -355,6 +356,12 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
   route('POST', '/knowledge/delete', ({body}) => {
     const ids = body.ids ?? (body.id ? [body.id] : [])
     if (!ids.length) throw new HttpError('缺少要删除的资料 id')
+    // Cascade flags go through the file/source-aware path; single-id only so each report stays explicit.
+    if ((body.deleteSource === true || body.deleteMedia === true) && body.id && !Array.isArray(body.ids)) {
+      const result = deleteKnowledgeCascade({repos, config}, {id: body.id, reason: body.reason, deleteSource: body.deleteSource === true, deleteMedia: body.deleteMedia === true})
+      if (result.ok) panel.publish({ kind: 'knowledge' })
+      return result
+    }
     const result = Array.isArray(body.ids) ? repos.knowledge.removeMany(ids, { reason: body.reason }) : repos.knowledge.remove(String(body.id), { reason: body.reason })
     if (result.ok) panel.publish({ kind: 'knowledge' })
     return result
@@ -476,6 +483,17 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
     })
     panel.publish({ kind: 'jobs', jobId: result.id, created: result.created })
     return { ok: true, ...result, job: repos.jobs.getJob(result.id) }
+  })
+
+  route('POST', '/jobs/delete', ({ body }) => {
+    const ids = [...new Set([...(Array.isArray(body.ids) ? body.ids : []), body.id ? String(body.id) : null].filter(Boolean).map(String))]
+    if (!ids.length) throw new HttpError('需要 id 或 ids')
+    const deleted = [], failed = []
+    for (const id of ids) {
+      try { repos.jobs.deleteJob(id); deleted.push(id) } catch (err) { failed.push({ id, error: String(err?.message ?? err) }) }
+    }
+    if (deleted.length) panel.publish({ kind: 'jobs' })
+    return { ok: true, requested: ids.length, deleted, failed, note: '岗位及其来源/状态历史/匹配已删除；已存在的投递记录保留但解除岗位绑定；知识库里的对应条目不会被自动删除，可在情报中心单独处理。' }
   })
 
   route('POST', '/job/verify', async ({ body }) => {

@@ -251,6 +251,21 @@ export class IntelRepo {
     return this.db.run('DELETE FROM recruit_event WHERE id = ?', [id]).changes > 0
   }
 
+  /** Deletes a forum post; its claims are kept as unattributed unless withClaims is requested. */
+  deletePost(id, { withClaims = false } = {}) {
+    return this.db.tx(() => {
+      const affectedClaims = withClaims
+        ? this.db.run('DELETE FROM forum_claim WHERE post_id = ?', [id]).changes
+        : this.db.run('UPDATE forum_claim SET post_id = NULL WHERE post_id = ?', [id]).changes
+      const removed = this.db.run('DELETE FROM forum_post WHERE id = ?', [id]).changes
+      return { removed: removed > 0, claimsRemoved: withClaims ? affectedClaims : 0, claimsDetached: withClaims ? 0 : affectedClaims }
+    })
+  }
+
+  deleteClaim(id) {
+    return this.db.run('DELETE FROM forum_claim WHERE id = ?', [id]).changes > 0
+  }
+
   // ── business units ─────────────────────────────────────────────────────────
   upsertUnit(input) {
     const name = str(input.name, 200)

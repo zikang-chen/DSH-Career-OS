@@ -22,6 +22,7 @@ import {buildJob360,assessJobDisplay} from './job360.js'
 import {withJobListEvidence} from './job-list-evidence.js'
 import {ResearchBudget} from './research-budget.js'
 import {buildToday,updateTodayTask} from './today.js'
+import {deleteKnowledgeCascade} from './knowledge-delete.js'
 import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
@@ -73,13 +74,17 @@ export function registerCareerTools(ctx, deps) {
     registered.push(definition.name)
   }
 
-  add(makeTool({name:'career_knowledge',description:'分类知识库：列出/读取岗位JD、面经、公告、薪资和研究，按公司/岗位/平台/整理状态检索；整理不覆盖原文。删除需显式 confirm=true，并保留审计；不删除岗位/面经原文。',params:{action:S('list|get|update|stats|delete'),id:S('资料id（delete 时必填，或用 ids）'),ids:SA('批量删除的资料id'),confirm:B('删除必须显式传 true；先向用户确认'),reason:S('删除原因（写进审计）'),query:S('全文关键词'),kind:S('job|interview|announcement|salary|research'),company:S('公司'),platform:S('来源平台'),status:S('inbox|active|archived'),role:S('整理后的岗位方向'),notes:S('整理备注'),tags:SA('整理标签'),limit:N('页大小'),offset:N('偏移')},handler:(args)=>{
+  add(makeTool({name:'career_knowledge',description:'分类知识库：列出/读取岗位JD、面经、公告、薪资和研究，按公司/岗位/平台/整理状态检索；整理不覆盖原文。删除需显式 confirm=true，并保留审计；可用 deleteSource 连带删除关联岗位/面经原文，deleteMedia 删除本机已下载图片。',params:{action:S('list|get|update|stats|delete'),id:S('资料id（delete 时必填，或用 ids）'),ids:SA('批量删除的资料id'),confirm:B('删除必须显式传 true；先向用户确认'),reason:S('删除原因（写进审计）'),deleteSource:B('连带删除关联的岗位/面经原文（默认 false）'),deleteMedia:B('删除本机已下载的图片文件（默认 false）'),query:S('全文关键词'),kind:S('job|interview|announcement|salary|research'),company:S('公司'),platform:S('来源平台'),status:S('inbox|active|archived'),role:S('整理后的岗位方向'),notes:S('整理备注'),tags:SA('整理标签'),limit:N('页大小'),offset:N('偏移')},handler:(args)=>{
     const action=args.action??'list'
     if(action==='get')return {ok:true,item:repos.knowledge.get(String(args.id))}
     if(action==='stats')return {ok:true,stats:repos.knowledge.stats()}
     if(action==='update'){const patch={};for(const key of ['status','company','role','notes','tags'])if(args[key]!==undefined)patch[key]=args[key];return {ok:true,item:repos.knowledge.update(String(args.id),patch)}}
     if(action==='delete'){
       if(args.confirm!==true)return {ok:false,error:'删除需要显式 confirm=true；请先向用户确认要删哪几条，再带 confirm 重试'}
+      if(args.deleteSource===true||args.deleteMedia===true){
+        if(!args.id)return {ok:false,error:'连带删除来源/图片时请逐条指定 id（不接受批量）'}
+        return deleteKnowledgeCascade({repos,config},{id:String(args.id),reason:args.reason,deleteSource:args.deleteSource===true,deleteMedia:args.deleteMedia===true})
+      }
       if(Array.isArray(args.ids)&&args.ids.length)return repos.knowledge.removeMany(args.ids,{reason:args.reason})
       if(!args.id)return {ok:false,error:'delete 需要 id 或 ids'}
       return repos.knowledge.remove(String(args.id),{reason:args.reason})

@@ -113,6 +113,18 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
   const [compareOpen, setCompareOpen] = useState(false)
   const [compareData, setCompareData] = useState(null)
   const [compareError, setCompareError] = useState(null)
+  const [confirmDeleteJob, setConfirmDeleteJob] = useState(false)
+  const [deletingJob, setDeletingJob] = useState(false)
+  const deleteThisJob = async () => {
+    if (!detail?.id) return
+    setDeletingJob(true)
+    try {
+      await apiPost('/jobs/delete', { id: detail.id })
+      detailRequest.current++
+      setDetailOpen(false); setSelected(null); setDetail(null); setConfirmDeleteJob(false)
+      load()
+    } catch (err) { setError(`删除岗位失败：${err.message}`) } finally { setDeletingJob(false) }
+  }
   const [form, setForm] = useState({ company: '', title: '', jdText: '', url: '', official: false })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -491,7 +503,9 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
                 : null,
               h(Btn, { onClick: () => onNavigate?.('studio', detail.id) }, '准备简历'),
               h(Btn, { onClick: () => onNavigate?.('interview', detail.id) }, 'JD 面试准备'),
-              h(Btn, { kind: 'primary', disabled: trackingBusy, onClick: () => track(false) }, trackingBusy ? '处理中…' : detail.application || job360?.application ? '查看投递进度' : '加入投递'))),
+              h(Btn, { kind: 'primary', disabled: trackingBusy, onClick: () => track(false) }, trackingBusy ? '处理中…' : detail.application || job360?.application ? '查看投递进度' : '加入投递'),
+              h(Btn, { disabled: deletingJob, onClick: () => confirmDeleteJob ? deleteThisJob() : setConfirmDeleteJob(true) }, deletingJob ? '删除中…' : confirmDeleteJob ? '再次点击确认删除岗位' : '删除岗位'))),
+          confirmDeleteJob ? h('div', { style: { ...S.muted, color: T.warn } }, '将删除该岗位及其来源、状态历史、匹配与笔记；已有投递保留但解除绑定，知识库条目不会被自动删除。不可撤销。') : null,
 
           h('div', { style: S.muted }, `来源状态：${radarStatus(detail)} · 证据等级 ${radarNote(detail.statusEvidenceLevel || '未知')} · 核验 ${detail.status_verified_at ? relTime(detail.status_verified_at) : '未知'} · ${radarJD(detail).label}`),
           h('div', { style: S.muted }, `主要来源：${radarText(detail.sources?.[0]?.source_name ?? detail.sources?.[0]?.source_type)}；${detail.sources?.[0]?.verification_status ?? '核验状态未知'}`),
