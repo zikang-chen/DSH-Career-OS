@@ -4,6 +4,10 @@
 
 它是 DeepSeek Harness 的插件。装好之后侧边栏多一个「求职面板」，对话里也能直接让它找岗位、核验状态、准备面试。
 
+![求职面板 · 今日工作台（本机真实数据渲染）](docs/assets/demo-overview.gif)
+
+> 上图是面板「总览」用本机真实数据渲染的结果，不含 DSH 外壳；完整的点击走查需要你在本机跑一遍。
+
 ## 它想解决什么
 
 找工作真正难的不是投得多，而是三件事没人替你记：
@@ -75,6 +79,10 @@ CareerOS 把这三件事做成可回放的记录：状态带来源与摘录，�
 npm test                       # 全部回归（当前 457 项）
 node scripts\build-client.mjs  # 改过 client/parts 后重新生成 bundle
 node scripts\setup-runtime.mjs # 首次装上 PDF 解析依赖
+
+# 重新生成 README 里的演示 GIF（用本机 data 真实数据渲染）
+node scripts\make-demo-gif.mjs
+python scripts\make-demo-gif.py
 ```
 
 改 Host 代码后重载插件：`plugin_manager set_plugin enabled=false/true target=include:dsh-career`。

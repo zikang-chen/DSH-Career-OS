@@ -125,7 +125,7 @@ function OverviewTab({ bootstrap, onNavigate, onRefresh }) {
         h('div', { style: { ...wrapRow, marginTop: 8 } },
           h(Chip, { tone: job.fit?.reliable === true ? 'accent' : 'warn' }, job.fit?.reliable === true && typeof job.fit?.score === 'number' ? `目标匹配 ${number(job.fit.score)}` : '匹配信息不足'),
           h('span', { style: S.muted }, text(job.statusDisplay) || '招聘状态待核实'),
-          h('span', { style: S.muted }, job.verifiedAt ? `核验于 ${text(job.verifiedAt)}` : '尚无核验时间')),
+          h('span', { style: S.muted }, job.verifiedAt ? `核验于 ${fmtDate(job.verifiedAt)}` : '尚无核验时间')),
         list(job.reasons).length ? h('div', { style: { ...S.body, marginTop: 8 } }, '推荐理由：', list(job.reasons).map(text).filter(Boolean).join('；')) : h('div', { style: { ...S.muted, marginTop: 8 } }, '推荐理由尚未提供。'),
         list(job.gaps).length ? h('div', { style: { ...S.muted, marginTop: 4 } }, '待补齐 / 核实：', list(job.gaps).map(text).filter(Boolean).join('；')) : null)))
         : h('div', { style: section }, h('div', { style: S.muted }, '暂无可展示的推荐。先添加岗位、补全画像或查看公司情报，不会为凑数生成推荐。'), entryActions())),
