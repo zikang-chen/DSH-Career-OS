@@ -6,11 +6,12 @@ import {parseJson}from'./util.js'
 import {resultSnapshot}from'./research-result.js'
 import {readResearchBudget}from'./research-settings.js'
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex')
-export function createResearchTasks(deps,{capture=captureSite,maxConcurrent=1}={}){
+export function createResearchTasks(deps,{capture=captureSite,maxConcurrent}={}){
  const {repos,panel}=deps
  const running=new Map(),results=new Map()
  let disposed=false
- const concurrency=Math.max(1,Math.min(3,Number(maxConcurrent)||1))
+ // An explicit factory value (tests/embedding) wins; otherwise the saved setting applies per start().
+ const fixedConcurrency=Number(maxConcurrent)>0?Math.max(1,Math.min(3,Number(maxConcurrent))):null
  return {
   start(args={}){
    if(disposed)return {ok:false,error:'研究服务已关闭，未启动新访问'}
@@ -24,7 +25,7 @@ export function createResearchTasks(deps,{capture=captureSite,maxConcurrent=1}={
      if(cached)return {ok:true,id:cached.id,status:'ok',cacheHit:true,note:`复用 ${Math.round(budgetSettings.cacheTtlMs/60000)} 分钟内相同条件的持久预览结果，未访问外部站点`}
    }
    const settings=readResearchBudget(repos.db).settings
-   const concurrency=Math.max(1,Math.min(3,Number(maxConcurrent)||settings.maxConcurrent))
+   const concurrency=fixedConcurrency??Math.max(1,Math.min(3,Number(settings.maxConcurrent)||1))
    if(running.size>=concurrency)return {ok:false,stage:'busy',error:'已有研究正在执行。请等待或取消当前任务，不会自动排队重复搜索。',activeTasks:[...running.keys()],limit:concurrency}
    const id=repos.monitor.startRun('research_task',args.site??'unknown'),controller=new AbortController()
    const budget=new ResearchBudget({maxVisits:settings.maxVisits,timeoutMs:settings.timeoutMs,signal:controller.signal})
