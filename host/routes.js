@@ -29,6 +29,7 @@ import {buildCompanyView} from './company-view.js'
 import {buildIndustryResearchPlan, collectIndustrySnippets, renderIndustryResearchNote} from './industry-research.js'
 import {buildApplicationCalendar} from './application-calendar.js'
 import {compareJobs} from './job-compare.js'
+import {aggregateClaims} from './claim-aggregate.js'
 import { capturePageJson, openForLogin } from './browser.js'
 import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
@@ -256,6 +257,11 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
     const view = buildCompanyView(repos, id, repos.profile.getWithResume())
     if (!view) throw new HttpError('公司不存在', 404)
     return view
+  })
+
+  route('GET', '/claims/aggregate', ({ query }) => {
+    const scope = repos.intel.claimsFor({ companyId: query.get('companyId') ?? undefined, jobId: query.get('jobId') ?? undefined, category: query.get('category') ?? undefined })
+    return aggregateClaims(scope.groups.flatMap((g) => g.items))
   })
 
   route('GET', '/industries', () => ({ ok: true, industries: repos.intel.listIndustries() }))
