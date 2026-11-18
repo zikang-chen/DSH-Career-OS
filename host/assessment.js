@@ -114,7 +114,7 @@ function assessEvidence(job, nowMs, knowledge) {
   else if (fresh && status === 'CLOSED') statusAssessment = 'verified_closed'
   else if (fresh && status === 'UPCOMING') statusAssessment = 'verified_upcoming'
   else if (stored === 'STALE' || (ageDays !== null && ageDays > 7) || (storedAge !== null && storedAge > 7)) statusAssessment = 'stale'
-  else if (stored === 'OPEN' || status === 'OPEN') statusAssessment = 'open-unverified'
+  else if (stored === 'OPEN' || status === 'OPEN' || stored === 'UNVERIFIED') statusAssessment = 'open-unverified'
   return {
     textComplete: Boolean(text(job.description) && text(job.requirements)),
     hasJdText: Boolean(text(job.description) || text(job.requirements)),

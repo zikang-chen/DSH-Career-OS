@@ -1233,7 +1233,7 @@ function IndustryTab() {
   )
 }
 
-function CompanyTab() {
+function CompanyTab({ onNavigate } = {}) {
   const [companies, setCompanies] = useState(null)
   const [detail, setDetail] = useState(null)
   const [form, setForm] = useState({ name: '', careersUrl: '', internUrl: '', cities: '', interest: 'watch' })
@@ -1244,7 +1244,10 @@ function CompanyTab() {
   }, [])
   useEffect(load, [load])
 
-  const open = (id) => apiGet(`/company?id=${encodeURIComponent(id)}`).then((res) => setDetail(res.company)).catch((err) => setError(err.message))
+  const open = (id) => apiGet(`/company?id=${encodeURIComponent(id)}`).then((res) => setDetail(res)).catch((err) => setError(err.message))
+  const adoptCareers = (company, url) => apiPost('/company', { id: company.id, name: company.name, careersUrl: url })
+    .then(() => { setError(null); open(company.id); load() })
+    .catch((err) => setError(`采用招聘入口失败（简历与岗位数据未改动）：${err.message}`))
 
   return h('div', { style: S.col },
     error ? h('div', { style: { ...S.card, ...S.muted, color: T.error } }, error) : null,
@@ -1271,16 +1274,37 @@ function CompanyTab() {
       h('div', { style: S.card },
         detail
           ? h('div', { style: S.col },
-            h('div', { style: S.h2 }, detail.name),
-            h('div', { style: S.muted }, [detail.website, detail.careers_url].filter(Boolean).join(' · ') || '未填写官网'),
-            detail.careers_url ? h('a', { href: detail.careers_url, target: '_blank', rel: 'noreferrer', style: { color: T.accent, ...S.body } }, '打开官方招聘页') : null,
-            h('div', { style: S.h3, marginTop: 8 }, `在库岗位（${detail.jobs.length}）`),
-            detail.jobs.length ? detail.jobs.slice(0, 8).map((j) => h('div', { key: j.id, style: S.muted }, `${j.title} · ${j.status}`)) : h('div', { style: S.muted }, '暂无'),
-            h('div', { style: { ...S.h3, marginTop: 8 } }, '论坛观点分布'),
-            detail.claimStats?.length
-              ? detail.claimStats.map((c, i) => h('div', { key: i, style: S.muted }, `${c.category} · ${c.evidence_level} 级 · ${c.n} 条`))
-              : h('div', { style: S.muted }, '暂无（需手动导入论坛内容）'))
-          : h(Empty, { title: '选择左侧公司', hint: '公司档案含招聘入口、在库岗位、研究简报与论坛观点统计。' })))
+            h('div', { style: S.h2 }, detail.company.name),
+            h('div', { style: S.muted }, [detail.company.website, detail.company.careers_url, detail.industry?.name].filter(Boolean).join(' · ') || '未填写官网'),
+            detail.company.careers_url ? h('a', { href: detail.company.careers_url, target: '_blank', rel: 'noreferrer', style: { color: T.accent, ...S.body } }, '打开官方招聘页') : null,
+            detail.diagnosis?.careersEntryMissing && detail.diagnosis.officialSourceOrigins?.length
+              ? h('div', { style: { ...S.cardTight, borderColor: T.warn, marginTop: 8 } },
+                h('div', { style: S.h3 }, '档案关联诊断'),
+                h('div', { style: { ...S.muted, whiteSpace: 'pre-wrap' } }, detail.diagnosis.note),
+                detail.diagnosis.officialSourceOrigins.map((url) => h('div', { key: url, style: { ...S.row, flexWrap: 'wrap' } },
+                  h('a', { href: url, target: '_blank', rel: 'noreferrer', style: { ...S.muted, color: T.accent } }, url),
+                  detail.diagnosis.candidateCareersUrl === url
+                    ? h(Btn, { onClick: () => adoptCareers(detail.company, url) }, '采用为招聘入口')
+                    : h('span', { style: { ...S.muted, fontSize: 11 } }, '多个来源，请手动选择'))))
+              : null,
+            h('div', { style: S.h3, marginTop: 8 }, `在库岗位（${(detail.jobs ?? []).length}）`),
+            (detail.jobs ?? []).length
+              ? detail.jobs.slice(0, 8).map((j) => h('div', { key: j.id, style: { ...S.row, justifyContent: 'space-between', padding: '2px 0' } },
+                h('span', { style: S.muted }, `${j.title} · ${j.statusDisplay ?? j.status}`),
+                h(Btn, { kind: 'ghost', onClick: () => onNavigate?.('radar', j.id) }, '查看岗位')))
+              : h('div', { style: S.muted }, '暂无关联岗位。若该企业确有招聘页，先登记入口再抓取岗位。'),
+            (detail.units ?? []).length
+              ? h('div', null, h('div', { style: S.h3, marginTop: 8 }, '业务部门'), detail.units.map((u, i) => h('div', { key: i, style: S.muted }, `${u.name}${u.strategic_role ? ` · ${u.strategic_role}` : ''}`)))
+              : null,
+            (detail.reports ?? []).length
+              ? h('div', null, h('div', { style: S.h3, marginTop: 8 }, '研究简报'),
+                detail.reports.map((r) => h('div', { key: r.id, style: S.muted }, `${r.title} · ${fmtDate(r.updated_at ?? r.data_as_of)}`)))
+              : h('div', { style: { ...S.muted, marginTop: 8 } }, '还没有公司研究。可在对话里让我基于公开资料整理，并标注来源与时间。'),
+            h('div', { style: S.h3, marginTop: 8 }, '论坛观点分布'),
+            detail.company.claimStats?.length
+              ? detail.company.claimStats.map((c, i) => h('div', { key: i, style: S.muted }, `${c.category} · ${c.evidence_level} 级 · ${c.n} 条`))
+              : h('div', { style: S.muted }, '暂无（需导入有来源的论坛内容）'))
+          : h(Empty, { title: '选择左侧公司', hint: '公司档案汇总招聘入口、在库岗位、业务部门、研究简报与论坛观点；岗位状态按证据显示，不沿用历史标签。' })))
   )
 }
 
@@ -2840,7 +2864,7 @@ function Panel({ onClose }) {
       case 'resume': return h(ResumeTab, { bootstrap: data, onChanged: bump, mode: 'profile', onNavigate: navigate })
       case 'radar': return h(RadarTab, { focusCode, onChanged: bump, onNavigate: navigate })
       case 'tracker': return h(TrackerTab, { bootstrap: data, onChanged: bump, onNavigate: navigate, focusCode })
-      case 'company': return h(CompanyTab)
+      case 'company': return h(CompanyTab, { onNavigate: navigate })
       case 'industry': return h(IndustryTab)
       case 'social': return h(SocialTab, { onNavigate: navigate })
       case 'interview': return h(InterviewTab, { focusCode })

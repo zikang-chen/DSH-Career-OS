@@ -575,7 +575,7 @@ function Panel({ onClose }) {
       case 'resume': return h(ResumeTab, { bootstrap: data, onChanged: bump, mode: 'profile', onNavigate: navigate })
       case 'radar': return h(RadarTab, { focusCode, onChanged: bump, onNavigate: navigate })
       case 'tracker': return h(TrackerTab, { bootstrap: data, onChanged: bump, onNavigate: navigate, focusCode })
-      case 'company': return h(CompanyTab)
+      case 'company': return h(CompanyTab, { onNavigate: navigate })
       case 'industry': return h(IndustryTab)
       case 'social': return h(SocialTab, { onNavigate: navigate })
       case 'interview': return h(InterviewTab, { focusCode })

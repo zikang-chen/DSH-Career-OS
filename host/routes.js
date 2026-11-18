@@ -25,6 +25,7 @@ import {buildJob360,assessJobDisplay} from './job360.js'
 import {buildToday,updateTodayTask} from './today.js'
 import {createResearchTasks} from './research-tasks.js'
 import {withJobListEvidence} from './job-list-evidence.js'
+import {buildCompanyView} from './company-view.js'
 import { capturePageJson, openForLogin } from './browser.js'
 import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
@@ -241,10 +242,10 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
   route('GET', '/companies', ({ query }) => ({ ok: true, companies: repos.jobs.listCompanies({ query: query.get('query') ?? undefined }) }))
 
   route('GET', '/company', ({ query }) => {
-    const id = query.get('id')
-    const company = id ? repos.jobs.getCompany(id) : repos.jobs.getCompany(repos.jobs.resolveCompany(query.get('name') ?? '', false)?.id)
-    if (!company) throw new HttpError('公司不存在', 404)
-    return { ok: true, company }
+    const id = query.get('id') ?? repos.jobs.resolveCompany(query.get('name') ?? '', false)?.id
+    const view = buildCompanyView(repos, id, repos.profile.getWithResume())
+    if (!view) throw new HttpError('公司不存在', 404)
+    return view
   })
 
   route('GET', '/industries', () => ({ ok: true, industries: repos.intel.listIndustries() }))
