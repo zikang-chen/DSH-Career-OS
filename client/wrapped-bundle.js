@@ -1656,6 +1656,7 @@ function TrackerTab({ bootstrap, onChanged, onNavigate, focusCode }) {
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [typeFilter, setTypeFilter] = useState('')
+  const [calendar, setCalendar] = useState(null)
 
   const load = useCallback(() => {
     const params = new URLSearchParams()
@@ -1667,6 +1668,12 @@ function TrackerTab({ bootstrap, onChanged, onNavigate, focusCode }) {
     apiGet(`/applications${qs ? `?${qs}` : ''}`).then(setData).catch((err) => setError(err.message))
   }, [statusFilter, query, typeFilter, view])
   useEffect(load, [load])
+  useEffect(() => {
+    if (view !== 'calendar') return
+    let alive = true
+    apiGet('/applications/calendar?days=30').then((res) => { if (alive) setCalendar(res) }).catch((err) => { if (alive) setError(err.message) })
+    return () => { alive = false }
+  }, [view, data])
 
   const exportCsv = () => {
     const params = new URLSearchParams()
@@ -1843,6 +1850,7 @@ function TrackerTab({ bootstrap, onChanged, onNavigate, focusCode }) {
       h('div', { style: S.row },
         h(Btn, { kind: view === 'list' ? 'primary' : undefined, onClick: () => setView('list') }, '清单'),
         h(Btn, { kind: view === 'board' ? 'primary' : undefined, onClick: () => setView('board') }, '看板'),
+        h(Btn, { kind: view === 'calendar' ? 'primary' : undefined, onClick: () => setView('calendar') }, '日历'),
         h(Btn, { kind: 'ghost', onClick: exportCsv }, '导出 CSV'),
         h(Btn, { kind: 'ghost', onClick: load }, '刷新'))),
 
@@ -1897,6 +1905,27 @@ function TrackerTab({ bootstrap, onChanged, onNavigate, focusCode }) {
                 }, STATUS_OPTS.map((s) => h('option', { key: s, value: s }, data.labels[s] ?? s))),
                 a.next_action_at ? h('div', { style: { ...S.muted, fontSize: 11, marginTop: 4 } }, `下一步 ${fmtDate(a.next_action_at)}`) : null))))
           }))
+        : view === 'calendar'
+        ? (calendar === null ? h(Loading, { label: '读取日期…' })
+          : h('div', { style: S.col },
+            h('div', { style: { ...S.muted, fontSize: 12 } }, `今天 ${calendar.today} · 未来 ${calendar.horizonDays} 天；只显示已记录的日期，缺失不推断。`),
+            calendar.overdue?.length
+              ? h('div', { style: { ...S.card, borderColor: T.warn } },
+                h('div', { style: S.h3 }, `逾期跟进（${calendar.overdue.length}）`),
+                calendar.overdue.slice(0, 8).map((it) => h('div', { key: `${it.id}-${it.date}`, style: S.muted }, `${it.company} · ${it.jobTitle} — ${it.label}（应做于 ${it.date}）`)))
+              : null,
+            calendar.days?.length
+              ? calendar.days.map((day) => h('div', { key: day.date, style: S.card },
+                h('div', { style: { ...S.row, justifyContent: 'space-between' } }, h('span', { style: { ...S.body, fontWeight: 600 } }, day.date), h(Chip, null, `${day.items.length} 项`)),
+                day.items.map((it) => h('div', { key: `${it.id}-${it.kind}`, style: { ...S.row, justifyContent: 'space-between', padding: '3px 0' } },
+                  h('span', { style: S.muted }, `${it.kind === 'deadline' ? '截止' : it.kind === 'applied' ? '已投递' : '跟进'} · ${it.company} · ${it.jobTitle}`),
+                  h(Btn, { kind: 'ghost', onClick: () => openApp(it.id) }, '查看')))))
+              : h(Empty, { title: '未来 30 天没有已记录日期', hint: '给投递补上截止日或下一步日期后，这里会自动出现；不会替你编造日程。' }),
+            calendar.undated?.length
+              ? h('details', { style: S.cardTight }, h('summary', { style: { ...S.h3, cursor: 'pointer' } }, `未填日期的记录（${calendar.undated.length}）`),
+                calendar.undated.slice(0, 12).map((it) => h('div', { key: it.id, style: S.muted }, `${it.company} · ${it.jobTitle}`)))
+              : null,
+            h('div', { style: { ...S.muted, fontSize: 11 } }, (calendar.caveats ?? []).join(' '))))
         : listTable,
 
     // 投递详情弹层：冻结的 JD + 材料快照 + 时间线

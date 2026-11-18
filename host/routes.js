@@ -27,6 +27,7 @@ import {createResearchTasks} from './research-tasks.js'
 import {withJobListEvidence} from './job-list-evidence.js'
 import {buildCompanyView} from './company-view.js'
 import {buildIndustryResearchPlan, collectIndustrySnippets, renderIndustryResearchNote} from './industry-research.js'
+import {buildApplicationCalendar} from './application-calendar.js'
 import { capturePageJson, openForLogin } from './browser.js'
 import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
@@ -205,6 +206,11 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
   })
 
   route('GET', '/resumes', () => ({ ok: true, resumes: repos.profile.listResumes(), active: repos.profile.activeResume()?.id ?? null }))
+
+  route('GET', '/applications/calendar', ({ query }) => buildApplicationCalendar({
+    applications: repos.applications.list({ limit: 500 }),
+    days: query.get('days'),
+  }))
 
   route('GET', '/applications', ({ query }) => ({
     ok: true,
