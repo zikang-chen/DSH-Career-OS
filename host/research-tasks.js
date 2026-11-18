@@ -27,6 +27,7 @@ export function createResearchTasks(deps,{capture=captureSite,maxConcurrent=1}={
    const task={id,key,controller,budget,startedAt:new Date().toISOString()};running.set(id,task)
    const persist=()=>repos.db.run('UPDATE sync_run SET meta=? WHERE id=?',[{site:args.site,keyword:args.keyword,key,mode:args.dryRun===false?'import':'preview',budget:budget.summary()},id])
    persist()
+   budget.onProgress=()=>{if(!disposed)persist()}
    task.promise=Promise.resolve().then(()=>capture(args,{...deps,budget,signal:controller.signal})).then(result=>{
     const cancelled=controller.signal.aborted
     const safe=cancelled?{...result,ok:false,stage:'cancelled',error:'用户已取消；已完成的步骤保留，未继续追加访问'}:result

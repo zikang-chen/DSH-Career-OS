@@ -238,6 +238,16 @@ test('data-driven tabs render their initial (loading) state', () => {
   renderTree(React.createElement(I.InterviewTab, {}))
 })
 
+test('profile and materials navigation are separated without deleting compatible tab keys',()=>{
+ const {__internals:I}=loadBundle()
+ assert.equal(I.TABS.find(t=>t.key==='resume').label,'我的画像')
+ assert.equal(I.TABS.find(t=>t.key==='studio').label,'简历中心')
+ const groups=I.WORKSPACES
+ assert.ok(groups.find(g=>g.key==='resume').tabs.includes('studio'))
+ assert.ok(!groups.find(g=>g.key==='resume').tabs.includes('resume'))
+ assert.ok(groups.find(g=>g.key==='settings').tabs.includes('resume'))
+})
+
 test('every declared tab key has a renderer', () => {
   const { __internals: I } = loadBundle()
   const keys = I.TABS.map((t) => t.key)

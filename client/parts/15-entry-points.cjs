@@ -103,6 +103,7 @@ module.exports = {
     InterviewTab,
     SettingsTab,
     TABS,
+    WORKSPACES,
     unwrapCareerRemote,
     agentBridge: () => careerAgentBridge,
   },

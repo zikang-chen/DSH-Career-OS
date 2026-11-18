@@ -17,7 +17,7 @@ const KIND_OPTIONS = [
   ['certificate', '证书'], ['skill', '技能'],
 ]
 
-function StudioTab({ onChanged, focusCode }) {
+function StudioTab({ bootstrap, onChanged, focusCode, onNavigate }) {
   const [view, setView] = useState(focusCode ? 'tailor' : 'upload')
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null)
@@ -333,12 +333,13 @@ function StudioTab({ onChanged, focusCode }) {
           : h('div', { style: { ...S.muted, marginTop: 20, textAlign: 'center' } },
             '点「编译 PDF」后在这里预览。编译使用本机 XeLaTeX（-no-shell-escape + 超时保护），相同源码复用缓存。'))))
 
-  const body = view === 'upload'
+  // Resolve after all view helpers are initialized (including docsView).
+  const renderBody = () => view === 'upload'
     ? h('div', { style: S.col },
       h('div', { style: S.card },
         h('div', { style: S.h2 }, '上传简历'),
         h('div', { style: { ...S.muted, marginBottom: 10 } },
-          '支持 .pdf / .docx / .md / .txt。上传后会：① 提取文本 ② 生成解析候选 ③ 把识别到的经历沉淀进素材库（标为未确认）。原文件保存在本机 data/resumes/。'),
+          '支持 .pdf / .docx / .md / .txt。上传只保存原文并生成解析候选，不会自动写入画像、确认属实或覆盖当前简历。接下来去「素材库」合并去重。原文件保存在本机 data/resumes/。'),
         h('input', {
           type: 'file',
           multiple: true,
@@ -347,7 +348,12 @@ function StudioTab({ onChanged, focusCode }) {
           style: { ...S.input, padding: 8, cursor: 'pointer' },
         }),
         h('div', { style: { ...S.muted, marginTop: 6, fontSize: 11 } }, '可以一次选多份（旧版本、不同方向、零散笔记都行，最多 40 份）。每份都会保存原文，互不覆盖。'),
-        uploading ? h('div', { style: { ...S.muted, marginTop: 8 } }, '正在批量上传并解析…') : null),
+        uploading ? h('div', { style: { ...S.muted, marginTop: 8 } }, '正在批量上传并解析…') : null,
+        h(Btn, { kind: 'ghost', onClick: () => onNavigate?.('resume') }, '编辑我的画像')),
+      h('details', { style: S.card },
+        h('summary', { style: { ...S.h3, cursor: 'pointer' } }, '文本 / 本机路径导入、版本对比与解析确认（兼容入口）'),
+        h('div', { style: { ...S.muted, margin: '8px 0' } }, '保留旧版导入方式。解析建议只有经你核对并确认后才会写入画像。'),
+        h(ResumeTab, { mode: 'materials', bootstrap, onChanged })),
       h('div', { style: S.card },
         h('div', { style: S.h2 }, '这套东西怎么配合用'),
         h('div', { style: { ...S.body } },
@@ -476,9 +482,9 @@ function StudioTab({ onChanged, focusCode }) {
     error ? h('div', { style: { ...S.card, borderColor: T.error, ...S.muted, color: T.error } }, error) : null,
     notice ? h('div', { style: { ...S.card, borderColor: T.success, ...S.muted, color: T.success } }, notice) : null,
     h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap' } },
-      h('div', { style: S.h1 }, '简历工作室'),
+      h('div', { style: S.h1 }, '简历中心'),
       subnav),
-    body)
+    renderBody())
 }
 
 /**
@@ -565,8 +571,8 @@ function Panel({ onClose }) {
   const content = () => {
     switch (tab) {
       case 'plan': return h(PlanTab, { onChanged: bump })
-      case 'studio': return h(StudioTab, { onChanged: bump, focusCode })
-      case 'resume': return h(ResumeTab, { bootstrap: data, onChanged: bump })
+      case 'studio': return h(StudioTab, { bootstrap: data, onChanged: bump, focusCode, onNavigate: navigate })
+      case 'resume': return h(ResumeTab, { bootstrap: data, onChanged: bump, mode: 'profile', onNavigate: navigate })
       case 'radar': return h(RadarTab, { focusCode, onChanged: bump, onNavigate: navigate })
       case 'tracker': return h(TrackerTab, { bootstrap: data, onChanged: bump, onNavigate: navigate, focusCode })
       case 'company': return h(CompanyTab)

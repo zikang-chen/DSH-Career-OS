@@ -1,5 +1,5 @@
 // ─── Resume Studio ───────────────────────────────────────────────────────────
-function ResumeTab({ bootstrap, onChanged }) {
+function ResumeTab({ bootstrap, onChanged, mode = 'profile', onNavigate }) {
   const backend = useBackend()
   const [path, setPath] = useState('')
   const [text, setText] = useState('')
@@ -54,8 +54,13 @@ function ResumeTab({ bootstrap, onChanged }) {
   return h('div', { style: S.col },
     backend.error ? h(ErrorBox, { error: backend.error, onRetry: () => backend.setError(null) }) : null,
 
+    mode === 'profile' ? h('div', { style: S.card },
+      h('div', { style: S.h1 }, '求职画像'),
+      h('div', { style: { ...S.muted, marginBottom: 8 } }, '这里只维护求职画像与偏好。字段齐全不等于已经人工核实；简历导入、解析确认与版本对比统一在简历中心处理。'),
+      h(Btn, { onClick: () => onNavigate?.('studio') }, '前往简历中心')) : null,
+
     h('div', { style: S.grid(340) },
-      h('div', { style: S.card },
+      mode === 'materials' ? h('div', { style: S.card },
         h('div', { style: S.h2 }, '导入简历'),
         h('div', { style: { ...S.muted, marginBottom: 8 } }, '支持 .md / .txt / .docx / .pdf。解析结果只是「候选」，确认后才会写入画像。'),
         h('div', { style: S.col, gap: 8 },
@@ -64,9 +69,9 @@ function ResumeTab({ bootstrap, onChanged }) {
           h(Field, { label: '或直接粘贴简历全文', hint: 'PDF 是扫描件或 CID 字体时用这个' },
             h('textarea', { style: { ...S.textarea, minHeight: 110 }, value: text, onChange: (e) => setText(e.target.value), placeholder: '在这里粘贴简历文本…' })),
           h(Field, { label: '版本标签（可选）' }, h('input', { style: S.input, value: label, onChange: (e) => setLabel(e.target.value), placeholder: '产品方向-v1' })),
-          h(Btn, { kind: 'primary', disabled: backend.busy, onClick: doImport }, backend.busy ? '解析中…' : '导入并解析'))),
+          h(Btn, { kind: 'primary', disabled: backend.busy, onClick: doImport }, backend.busy ? '解析中…' : '导入并解析'))) : null,
 
-      h('div', { style: S.card },
+      mode === 'materials' ? h('div', { style: S.card },
         h('div', { style: S.h2 }, '简历版本'),
         resumes.length
           ? h('div', { style: S.col }, resumes.map((r) => h('div', { key: r.id, style: { ...S.cardTight, ...S.row, justifyContent: 'space-between' } },
@@ -95,9 +100,9 @@ function ResumeTab({ bootstrap, onChanged }) {
               compare.added.slice(0, 6).map((line, i) => h('div', { key: `a${i}`, style: { ...S.mono, color: T.success } }, `+ ${line.slice(0, 90)}`)),
               h('div', { style: { ...S.muted, color: T.error, marginTop: 6 } }, `删除 ${compare.removed.length} 行`),
               compare.removed.slice(0, 6).map((line, i) => h('div', { key: `r${i}`, style: { ...S.mono, color: T.error } }, `- ${line.slice(0, 90)}`))) : null)
-          : null),
+          : null) : null,
 
-      h('div', { style: S.card },
+      mode === 'profile' ? h('div', { style: S.card },
         h('div', { style: S.h2 }, '个人画像'),
         h('div', { style: { ...S.muted, marginBottom: 8 } }, '留空即「未知」，系统不会替你补全；所有数据只存在本机。'),
         profileForm ? h('div', { style: S.grid(150) },
@@ -122,9 +127,9 @@ function ResumeTab({ bootstrap, onChanged }) {
             h('div', { style: S.h3 }, `技能矩阵（${bootstrap.skills.length}）`),
             h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 6 } },
               bootstrap.skills.map((s) => h(Chip, { key: s.id, tone: s.verified ? 'success' : undefined }, `${s.name}${s.verified ? ' ✓' : ''}`))))
-          : null)),
+          : null) : null),
 
-      proposal
+      mode === 'materials' && proposal
         ? h('div', { style: S.card },
           h('div', { style: { ...S.row, justifyContent: 'space-between' } },
             h('div', { style: S.h2 }, '解析结果（需要你确认）'),
@@ -143,6 +148,7 @@ function ResumeTab({ bootstrap, onChanged }) {
             h('div', { style: S.cardTight }, h('div', { style: S.h3 }, '解析提醒'), proposal.proposal.notes.length
               ? proposal.proposal.notes.map((n, i) => h('div', { key: i, style: { ...S.muted, marginBottom: 3 } }, `· ${n}`))
               : h('div', { style: S.muted }, '无'))),
+          h('div', { style: { ...S.muted, marginTop: 10 } }, '以上仅为解析建议，不代表人工核实。只有你核对并点击下方确认按钮，才会把建议写入画像；导入或解析状态不会自动确认。'),
           h('div', { style: { ...S.row, marginTop: 10 } },
             h(Btn, {
               kind: 'primary',

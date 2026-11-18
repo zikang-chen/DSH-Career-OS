@@ -450,7 +450,7 @@ function OverviewTab({ bootstrap, onNavigate, onRefresh }) {
 }
 
 // ─── Resume Studio ───────────────────────────────────────────────────────────
-function ResumeTab({ bootstrap, onChanged }) {
+function ResumeTab({ bootstrap, onChanged, mode = 'profile', onNavigate }) {
   const backend = useBackend()
   const [path, setPath] = useState('')
   const [text, setText] = useState('')
@@ -505,8 +505,13 @@ function ResumeTab({ bootstrap, onChanged }) {
   return h('div', { style: S.col },
     backend.error ? h(ErrorBox, { error: backend.error, onRetry: () => backend.setError(null) }) : null,
 
+    mode === 'profile' ? h('div', { style: S.card },
+      h('div', { style: S.h1 }, '求职画像'),
+      h('div', { style: { ...S.muted, marginBottom: 8 } }, '这里只维护求职画像与偏好。字段齐全不等于已经人工核实；简历导入、解析确认与版本对比统一在简历中心处理。'),
+      h(Btn, { onClick: () => onNavigate?.('studio') }, '前往简历中心')) : null,
+
     h('div', { style: S.grid(340) },
-      h('div', { style: S.card },
+      mode === 'materials' ? h('div', { style: S.card },
         h('div', { style: S.h2 }, '导入简历'),
         h('div', { style: { ...S.muted, marginBottom: 8 } }, '支持 .md / .txt / .docx / .pdf。解析结果只是「候选」，确认后才会写入画像。'),
         h('div', { style: S.col, gap: 8 },
@@ -515,9 +520,9 @@ function ResumeTab({ bootstrap, onChanged }) {
           h(Field, { label: '或直接粘贴简历全文', hint: 'PDF 是扫描件或 CID 字体时用这个' },
             h('textarea', { style: { ...S.textarea, minHeight: 110 }, value: text, onChange: (e) => setText(e.target.value), placeholder: '在这里粘贴简历文本…' })),
           h(Field, { label: '版本标签（可选）' }, h('input', { style: S.input, value: label, onChange: (e) => setLabel(e.target.value), placeholder: '产品方向-v1' })),
-          h(Btn, { kind: 'primary', disabled: backend.busy, onClick: doImport }, backend.busy ? '解析中…' : '导入并解析'))),
+          h(Btn, { kind: 'primary', disabled: backend.busy, onClick: doImport }, backend.busy ? '解析中…' : '导入并解析'))) : null,
 
-      h('div', { style: S.card },
+      mode === 'materials' ? h('div', { style: S.card },
         h('div', { style: S.h2 }, '简历版本'),
         resumes.length
           ? h('div', { style: S.col }, resumes.map((r) => h('div', { key: r.id, style: { ...S.cardTight, ...S.row, justifyContent: 'space-between' } },
@@ -546,9 +551,9 @@ function ResumeTab({ bootstrap, onChanged }) {
               compare.added.slice(0, 6).map((line, i) => h('div', { key: `a${i}`, style: { ...S.mono, color: T.success } }, `+ ${line.slice(0, 90)}`)),
               h('div', { style: { ...S.muted, color: T.error, marginTop: 6 } }, `删除 ${compare.removed.length} 行`),
               compare.removed.slice(0, 6).map((line, i) => h('div', { key: `r${i}`, style: { ...S.mono, color: T.error } }, `- ${line.slice(0, 90)}`))) : null)
-          : null),
+          : null) : null,
 
-      h('div', { style: S.card },
+      mode === 'profile' ? h('div', { style: S.card },
         h('div', { style: S.h2 }, '个人画像'),
         h('div', { style: { ...S.muted, marginBottom: 8 } }, '留空即「未知」，系统不会替你补全；所有数据只存在本机。'),
         profileForm ? h('div', { style: S.grid(150) },
@@ -573,9 +578,9 @@ function ResumeTab({ bootstrap, onChanged }) {
             h('div', { style: S.h3 }, `技能矩阵（${bootstrap.skills.length}）`),
             h('div', { style: { ...S.row, flexWrap: 'wrap', gap: 6 } },
               bootstrap.skills.map((s) => h(Chip, { key: s.id, tone: s.verified ? 'success' : undefined }, `${s.name}${s.verified ? ' ✓' : ''}`))))
-          : null)),
+          : null) : null),
 
-      proposal
+      mode === 'materials' && proposal
         ? h('div', { style: S.card },
           h('div', { style: { ...S.row, justifyContent: 'space-between' } },
             h('div', { style: S.h2 }, '解析结果（需要你确认）'),
@@ -594,6 +599,7 @@ function ResumeTab({ bootstrap, onChanged }) {
             h('div', { style: S.cardTight }, h('div', { style: S.h3 }, '解析提醒'), proposal.proposal.notes.length
               ? proposal.proposal.notes.map((n, i) => h('div', { key: i, style: { ...S.muted, marginBottom: 3 } }, `· ${n}`))
               : h('div', { style: S.muted }, '无'))),
+          h('div', { style: { ...S.muted, marginTop: 10 } }, '以上仅为解析建议，不代表人工核实。只有你核对并点击下方确认按钮，才会把建议写入画像；导入或解析状态不会自动确认。'),
           h('div', { style: { ...S.row, marginTop: 10 } },
             h(Btn, {
               kind: 'primary',
@@ -2080,13 +2086,13 @@ function SettingsTab({ bootstrap, onChanged }) {
 const TABS = [
   { key: 'overview', label: '总览', icon: '◱' },
   { key: 'plan', label: '秋招计划', icon: '◷' },
-  { key: 'resume', label: '简历与画像', icon: '◧' },
-  { key: 'studio', label: '简历工作室', icon: '◨' },
+  { key: 'resume', label: '我的画像', icon: '◧' },
+  { key: 'studio', label: '简历中心', icon: '◨' },
   { key: 'radar', label: '岗位列表', icon: '◈' },
   { key: 'tracker', label: '投递管理', icon: '☰' },
   { key: 'company', label: '公司情报', icon: '◉' },
   { key: 'industry', label: '行业研究', icon: '◎' },
-  { key: 'social', label: '知识库', icon: '◔' },
+  { key: 'social', label: '情报中心', icon: '◔' },
   { key: 'interview', label: '面试准备', icon: '◐' },
   { key: 'settings', label: '设置', icon: '⚙' },
 ]
@@ -2099,8 +2105,8 @@ const WORKSPACES = [
   { key: 'home', label: '总览', hint: '今天做什么', tabs: ['overview', 'plan'] },
   { key: 'opportunities', label: '找岗位', hint: '浏览岗位与公司背景', tabs: ['radar', 'company', 'industry'] },
   { key: 'applications', label: '我的投递', hint: '跟进岗位、准备面试', tabs: ['tracker', 'interview'] },
-  { key: 'resume', label: '我的材料', hint: '真实经历、简历与参考资料', tabs: ['studio', 'resume', 'social'] },
-  { key: 'settings', label: '设置', hint: '数据源与系统', tabs: ['settings'] },
+  { key: 'resume', label: '我的材料', hint: '真实经历、简历与参考资料', tabs: ['studio', 'social'] },
+  { key: 'settings', label: '设置', hint: '数据源与系统', tabs: ['resume', 'settings'] },
 ]
 
 // ─── 秋招 / 春招作战计划 ─────────────────────────────────────────────────────
@@ -2276,7 +2282,7 @@ const KIND_OPTIONS = [
   ['certificate', '证书'], ['skill', '技能'],
 ]
 
-function StudioTab({ onChanged, focusCode }) {
+function StudioTab({ bootstrap, onChanged, focusCode, onNavigate }) {
   const [view, setView] = useState(focusCode ? 'tailor' : 'upload')
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState(null)
@@ -2592,12 +2598,13 @@ function StudioTab({ onChanged, focusCode }) {
           : h('div', { style: { ...S.muted, marginTop: 20, textAlign: 'center' } },
             '点「编译 PDF」后在这里预览。编译使用本机 XeLaTeX（-no-shell-escape + 超时保护），相同源码复用缓存。'))))
 
-  const body = view === 'upload'
+  // Resolve after all view helpers are initialized (including docsView).
+  const renderBody = () => view === 'upload'
     ? h('div', { style: S.col },
       h('div', { style: S.card },
         h('div', { style: S.h2 }, '上传简历'),
         h('div', { style: { ...S.muted, marginBottom: 10 } },
-          '支持 .pdf / .docx / .md / .txt。上传后会：① 提取文本 ② 生成解析候选 ③ 把识别到的经历沉淀进素材库（标为未确认）。原文件保存在本机 data/resumes/。'),
+          '支持 .pdf / .docx / .md / .txt。上传只保存原文并生成解析候选，不会自动写入画像、确认属实或覆盖当前简历。接下来去「素材库」合并去重。原文件保存在本机 data/resumes/。'),
         h('input', {
           type: 'file',
           multiple: true,
@@ -2606,7 +2613,12 @@ function StudioTab({ onChanged, focusCode }) {
           style: { ...S.input, padding: 8, cursor: 'pointer' },
         }),
         h('div', { style: { ...S.muted, marginTop: 6, fontSize: 11 } }, '可以一次选多份（旧版本、不同方向、零散笔记都行，最多 40 份）。每份都会保存原文，互不覆盖。'),
-        uploading ? h('div', { style: { ...S.muted, marginTop: 8 } }, '正在批量上传并解析…') : null),
+        uploading ? h('div', { style: { ...S.muted, marginTop: 8 } }, '正在批量上传并解析…') : null,
+        h(Btn, { kind: 'ghost', onClick: () => onNavigate?.('resume') }, '编辑我的画像')),
+      h('details', { style: S.card },
+        h('summary', { style: { ...S.h3, cursor: 'pointer' } }, '文本 / 本机路径导入、版本对比与解析确认（兼容入口）'),
+        h('div', { style: { ...S.muted, margin: '8px 0' } }, '保留旧版导入方式。解析建议只有经你核对并确认后才会写入画像。'),
+        h(ResumeTab, { mode: 'materials', bootstrap, onChanged })),
       h('div', { style: S.card },
         h('div', { style: S.h2 }, '这套东西怎么配合用'),
         h('div', { style: { ...S.body } },
@@ -2735,9 +2747,9 @@ function StudioTab({ onChanged, focusCode }) {
     error ? h('div', { style: { ...S.card, borderColor: T.error, ...S.muted, color: T.error } }, error) : null,
     notice ? h('div', { style: { ...S.card, borderColor: T.success, ...S.muted, color: T.success } }, notice) : null,
     h('div', { style: { ...S.row, justifyContent: 'space-between', flexWrap: 'wrap' } },
-      h('div', { style: S.h1 }, '简历工作室'),
+      h('div', { style: S.h1 }, '简历中心'),
       subnav),
-    body)
+    renderBody())
 }
 
 /**
@@ -2824,8 +2836,8 @@ function Panel({ onClose }) {
   const content = () => {
     switch (tab) {
       case 'plan': return h(PlanTab, { onChanged: bump })
-      case 'studio': return h(StudioTab, { onChanged: bump, focusCode })
-      case 'resume': return h(ResumeTab, { bootstrap: data, onChanged: bump })
+      case 'studio': return h(StudioTab, { bootstrap: data, onChanged: bump, focusCode, onNavigate: navigate })
+      case 'resume': return h(ResumeTab, { bootstrap: data, onChanged: bump, mode: 'profile', onNavigate: navigate })
       case 'radar': return h(RadarTab, { focusCode, onChanged: bump, onNavigate: navigate })
       case 'tracker': return h(TrackerTab, { bootstrap: data, onChanged: bump, onNavigate: navigate, focusCode })
       case 'company': return h(CompanyTab)
@@ -3000,6 +3012,7 @@ module.exports = {
     InterviewTab,
     SettingsTab,
     TABS,
+    WORKSPACES,
     unwrapCareerRemote,
     agentBridge: () => careerAgentBridge,
   },
