@@ -179,6 +179,37 @@ export class KnowledgeRepo {
     })
   }
 
+  /** Deletion is audited before removal and never touches the source job/forum post. */
+  remove(id, { reason } = {}) {
+    const existing = this.get(id)
+    if (!existing) return { ok: false, error: '资料不存在或已删除' }
+    const at = nowIso()
+    this.db.tx(() => {
+      this.db.run(`INSERT INTO sync_run (id,kind,target,started_at,finished_at,status,fetched,inserted,updated,duplicates,error,meta)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), 'knowledge_delete', existing.title, at, at, 'ok', 1, 0, 0, 0, null,
+          { id: existing.id, title: existing.title, kind: existing.kind, platform: existing.platform, identityUrl: existing.identityUrl ?? null, sourceEntityType: existing.sourceEntityType ?? null, sourceEntityId: existing.sourceEntityId ?? null, reason: str(reason, 500) ?? null }])
+      this.db.run('DELETE FROM knowledge_revision WHERE knowledge_id = ?', [id])
+      this.db.run('DELETE FROM knowledge WHERE id = ?', [id])
+    })
+    return {
+      ok: true,
+      removed: { id: existing.id, title: existing.title, kind: existing.kind, platform: existing.platform },
+      note: '已删除知识库条目及其历史修订；岗位/面经原文记录与已下载图片文件不在本操作内，删除记录已留审计。',
+    }
+  }
+
+  removeMany(ids, { reason } = {}) {
+    const list = [...new Set((Array.isArray(ids) ? ids : []).map(String).filter(Boolean))]
+    const removed = [], missing = []
+    for (const id of list) {
+      const result = this.remove(id, { reason })
+      if (result.ok) removed.push(result.removed)
+      else missing.push(id)
+    }
+    return { ok: true, removed, missing, note: `已删除 ${removed.length} 条${missing.length ? `，${missing.length} 条不存在` : ''}；审计已记录。` }
+  }
+
   stats() {
     const grouped = (column, defaults = {}) => Object.assign(defaults, Object.fromEntries(this.db.all(`SELECT ${column} AS key,count(*) AS n FROM knowledge GROUP BY ${column}`).map((r) => [r.key, Number(r.n)])))
     return { total: Number(this.db.scalar('SELECT count(*) FROM knowledge')),

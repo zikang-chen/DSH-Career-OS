@@ -73,12 +73,18 @@ export function registerCareerTools(ctx, deps) {
     registered.push(definition.name)
   }
 
-  add(makeTool({name:'career_knowledge',description:'分类知识库：列出/读取岗位JD、面经、公告、薪资和研究，按公司/岗位/平台/整理状态检索；整理不覆盖原文。',params:{action:S('list|get|update|stats'),id:S('资料id'),query:S('全文关键词'),kind:S('job|interview|announcement|salary|research'),company:S('公司'),platform:S('来源平台'),status:S('inbox|active|archived'),role:S('整理后的岗位方向'),notes:S('整理备注'),tags:SA('整理标签'),limit:N('页大小'),offset:N('偏移')},handler:(args)=>{
+  add(makeTool({name:'career_knowledge',description:'分类知识库：列出/读取岗位JD、面经、公告、薪资和研究，按公司/岗位/平台/整理状态检索；整理不覆盖原文。删除需显式 confirm=true，并保留审计；不删除岗位/面经原文。',params:{action:S('list|get|update|stats|delete'),id:S('资料id（delete 时必填，或用 ids）'),ids:SA('批量删除的资料id'),confirm:B('删除必须显式传 true；先向用户确认'),reason:S('删除原因（写进审计）'),query:S('全文关键词'),kind:S('job|interview|announcement|salary|research'),company:S('公司'),platform:S('来源平台'),status:S('inbox|active|archived'),role:S('整理后的岗位方向'),notes:S('整理备注'),tags:SA('整理标签'),limit:N('页大小'),offset:N('偏移')},handler:(args)=>{
     const action=args.action??'list'
     if(action==='get')return {ok:true,item:repos.knowledge.get(String(args.id))}
     if(action==='stats')return {ok:true,stats:repos.knowledge.stats()}
     if(action==='update'){const patch={};for(const key of ['status','company','role','notes','tags'])if(args[key]!==undefined)patch[key]=args[key];return {ok:true,item:repos.knowledge.update(String(args.id),patch)}}
-    if(action!=='list')throw new Error('action必须list/get/update/stats')
+    if(action==='delete'){
+      if(args.confirm!==true)return {ok:false,error:'删除需要显式 confirm=true；请先向用户确认要删哪几条，再带 confirm 重试'}
+      if(Array.isArray(args.ids)&&args.ids.length)return repos.knowledge.removeMany(args.ids,{reason:args.reason})
+      if(!args.id)return {ok:false,error:'delete 需要 id 或 ids'}
+      return repos.knowledge.remove(String(args.id),{reason:args.reason})
+    }
+    if(action!=='list')throw new Error('action必须list/get/update/stats/delete')
     return {ok:true,...repos.knowledge.list(args),stats:repos.knowledge.stats()}
   }}))
   add(makeTool({name:'career_knowledge_ocr',description:'对知识库关联图片执行本机OCR并保留原图哈希/逐图结果。识别默认待人工核对；不上传第三方、不覆盖作者正文。',params:{action:S('status|recognize|agent_prepare|agent_save；agent_prepare后必须read_image再保存；人工确认仅在界面'),id:S('知识库资料id'),index:N('图片序号，从1开始'),text:S('Agent实际看图后的逐字转录，不清楚标〔无法辨认〕')},handler:(args)=>args.action==='status'?ocrStatus({dataDir:config.dataDir}):args.action==='review'?{ok:false,error:'人工核对仅限用户在知识库界面确认，Agent不能代确认'}:processKnowledgeOcr({...args,action:args.action??'recognize'},{repos,config})}))

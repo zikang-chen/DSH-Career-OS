@@ -352,6 +352,13 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
   route('POST', '/knowledge/sync', () => ({ok:true,...syncKnowledgeIndex(repos)}))
   route('GET', '/knowledge/item', ({query}) => {const item=repos.knowledge.get(query.get('id'));if(!item)throw new HttpError('资料不存在',404);return {ok:true,item}})
   route('POST', '/knowledge/update', ({body}) => ({ok:true,item:repos.knowledge.update(String(body.id),Object.fromEntries(Object.entries(body).filter(([k])=>k!=='id')))}))
+  route('POST', '/knowledge/delete', ({body}) => {
+    const ids = body.ids ?? (body.id ? [body.id] : [])
+    if (!ids.length) throw new HttpError('缺少要删除的资料 id')
+    const result = Array.isArray(body.ids) ? repos.knowledge.removeMany(ids, { reason: body.reason }) : repos.knowledge.remove(String(body.id), { reason: body.reason })
+    if (result.ok) panel.publish({ kind: 'knowledge' })
+    return result
+  })
   route('GET', '/knowledge/ocr/status', () => ocrStatus({dataDir:config.dataDir}))
   route('POST', '/knowledge/ocr', ({body}) => processKnowledgeOcr(body,{repos,config}))
 
