@@ -4,9 +4,9 @@
 
 它是 DeepSeek Harness 的插件。装好之后侧边栏多一个「求职面板」，对话里也能直接让它找岗位、核验状态、准备面试。
 
-![求职面板 · 今日工作台（本机真实数据渲染）](docs/assets/demo-overview.gif)
+![求职面板：今日工作台 → 岗位列表 → 情报中心](docs/assets/demo-panel.gif)
 
-> 上图是面板「总览」用本机真实数据渲染的结果，不含 DSH 外壳；完整的点击走查需要你在本机跑一遍。
+> 真机截图，裁掉侧边栏后拼成；数据是本机真实数据（已按需脱敏，未替换文案）。
 
 ## 它想解决什么
 
@@ -80,8 +80,9 @@ npm test                       # 全部回归（当前 457 项）
 node scripts\build-client.mjs  # 改过 client/parts 后重新生成 bundle
 node scripts\setup-runtime.mjs # 首次装上 PDF 解析依赖
 
-# 重新生成 README 里的演示 GIF（用本机 data 真实数据渲染）
-node scripts\make-demo-gif.mjs
+# 重新生成 README 里的演示 GIF
+# ① 打开「求职面板」，切到 总览 / 岗位列表 / 情报中心 各截一张图存到 .tmp/gui/
+# ② 合成：
 python scripts\make-demo-gif.py
 ```
 
