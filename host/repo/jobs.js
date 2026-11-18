@@ -621,12 +621,18 @@ export class JobRepo {
     const official = Number(this.db.scalar(
       "SELECT count(DISTINCT js.job_id) FROM job_source js JOIN job j ON j.id = js.job_id WHERE j.archived = 0 AND js.source_type = 'official_careers'") ?? 0)
     const stale = byStatus.find((r) => r.status === 'STALE')?.n ?? 0
+    // A timestamp means a status observation exists, NOT that the role is verified open.
+    const evidenceOpen = Number(this.db.scalar(`SELECT count(DISTINCT h.job_id) FROM job_status_history h JOIN job j ON j.id = h.job_id
+      WHERE j.archived = 0 AND h.status = 'OPEN' AND h.source_type = 'official_careers'
+        AND coalesce(h.evidence, '') <> '' AND h.verified_at >= ?`, [new Date(Date.now() - 7 * 86400000).toISOString()]) ?? 0)
     return {
       total,
       byStatus: Object.fromEntries(byStatus.map((r) => [r.status, Number(r.n)])),
-      verifiedShare: total ? Number((verified / total).toFixed(3)) : 0,
+      statusTimestampShare: total ? Number((verified / total).toFixed(3)) : 0,
+      evidenceOpen,
       officialShare: total ? Number((official / total).toFixed(3)) : 0,
       staleShare: total ? Number((Number(stale) / total).toFixed(3)) : 0,
+      meaning: 'statusTimestampShare=有状态观察记录的比例，不代表仍在招；evidenceOpen=7天内带证据摘录的官方开放记录数。',
     }
   }
 }
