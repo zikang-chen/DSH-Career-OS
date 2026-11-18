@@ -720,6 +720,10 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
   const [selected, setSelected] = useState(null)
   const [detail, setDetail] = useState(null)
   const [detailOpen, setDetailOpen] = useState(false)
+  const [compareIds, setCompareIds] = useState([])
+  const [compareOpen, setCompareOpen] = useState(false)
+  const [compareData, setCompareData] = useState(null)
+  const [compareError, setCompareError] = useState(null)
   const [form, setForm] = useState({ company: '', title: '', jdText: '', url: '', official: false })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -845,8 +849,12 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
   const cellStyle = { padding: '8px 10px', textAlign: 'left', verticalAlign: 'top', borderBottom: `1px solid ${T.border}` }
   const tableBody = h('div', { className: 'career-radar-table', style: { overflowX: 'auto', display: viewMode === 'table' ? 'block' : 'none' } },
     h('table', { style: { width: '100%', minWidth: 920, borderCollapse: 'collapse', ...S.body } },
-      h('thead', null, h('tr', null, ['公司', '岗位', '类型', '城市', '状态', '截止', 'JD', '核验 / 操作'].map((label) => h('th', { key: label, scope: 'col', style: cellStyle }, label)))),
+      h('thead', null, h('tr', null, ['对比', '公司', '岗位', '类型', '城市', '状态', '截止', 'JD', '核验 / 操作'].map((label) => h('th', { key: label, scope: 'col', style: cellStyle }, label)))),
       h('tbody', null, visibleJobs.map((job) => h('tr', { key: job.id, style: { background: selected === job.id ? 'rgba(37,99,235,0.05)' : undefined } },
+        h('td', { style: cellStyle }, h('input', {
+          type: 'checkbox', checked: compareIds.includes(job.id), 'aria-label': `选择 ${radarText(job.title)} 加入对比`,
+          onChange: () => setCompareIds((prev) => prev.includes(job.id) ? prev.filter((id) => id !== job.id) : (prev.length >= 5 ? prev : [...prev, job.id])),
+        })),
         h('td', { style: cellStyle }, radarText(job.company ?? job.company_name)),
         h('td', { style: cellStyle }, h('button', { type: 'button', onClick: () => openDetail(job.id), style: { border: 0, background: 'none', color: T.accent, cursor: 'pointer', textAlign: 'left', padding: 0 } }, radarText(job.title))),
         h('td', { style: cellStyle }, radarRecruitLabels[radarValue(job, 'recruitType', 'recruit_type')] ?? '未知'),
@@ -887,6 +895,35 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
               job.matchReliable === false ? h(Chip, { tone: 'warn' }, '匹配待核对（信息不足）') : h(Score, { value: job.matchScore }))),
         ))))
 
+  // Comparison renders as arrays to keep nesting shallow and reviewable.
+  const compareCellText = (v) => (v === null || v === undefined || v === '' ? '未知' : v === true ? '是' : v === false ? '否' : String(v))
+  const compareTable = (() => {
+    if (!compareData) return h(Loading, { label: '对比中…' })
+    const header = h('tr', null, [
+      h('th', { key: 'field', scope: 'col', style: cellStyle }, '字段'),
+      ...compareData.jobs.map((j) => h('th', { key: j.id, scope: 'col', style: cellStyle }, `${j.company} · ${j.title}`)),
+    ])
+    const fieldRows = compareData.differences.map((d) => h('tr', { key: d.key, style: { background: d.differs ? undefined : 'rgba(0,0,0,0.02)' } }, [
+      h('th', { key: 'l', scope: 'row', style: cellStyle }, d.label),
+      ...d.values.map((v, i) => h('td', { key: i, style: cellStyle }, compareCellText(v))),
+    ]))
+    const reasonRow = h('tr', { key: 'reasons' }, [
+      h('th', { key: 'l', scope: 'row', style: cellStyle }, '主要理由'),
+      ...compareData.jobs.map((j) => h('td', { key: j.id, style: cellStyle }, (j.reasons ?? []).length
+        ? (j.reasons ?? []).map((r, i) => h('div', { key: i, style: S.muted }, `· ${r}`))
+        : '暂无')),
+    ])
+    const riskRow = h('tr', { key: 'risks' }, [
+      h('th', { key: 'l', scope: 'row', style: cellStyle }, '风险 / 未确认'),
+      ...compareData.jobs.map((j) => h('td', { key: j.id, style: cellStyle }, [...(j.risks ?? []), ...(j.unknowns ?? [])].slice(0, 3).map((r, i) => h('div', { key: i, style: S.muted }, `· ${r}`)))),
+    ])
+    return h('div', { style: { overflowX: 'auto' } },
+      h('table', { style: { width: '100%', minWidth: 640, borderCollapse: 'collapse', ...S.body } },
+        h('thead', null, header),
+        h('tbody', null, fieldRows, reasonRow, riskRow)),
+      h('div', { style: { ...S.muted, marginTop: 8, fontSize: 11 } }, (compareData.caveats ?? []).join(' ')))
+  })()
+
   return h('div', { style: S.col },
     error ? h('div', { style: { ...S.card, borderColor: T.error, ...S.muted, color: T.error } }, error) : null,
 
@@ -911,7 +948,16 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
             h('option', { value: '' }, '全部用工形式'), [['onsite', '现场'], ['remote', '远程'], ['hybrid', '混合']].map(([value, label]) => h('option', { key: value, value }, label))),
           h('input', { 'aria-label': '毕业年份', type: 'number', style: { ...S.input, width: 110 }, value: gradYear, onChange: (e) => changeCondition(setGradYear, e.target.value), placeholder: '毕业年份' }),
           h('input', { 'aria-label': '每周最多出勤天数', type: 'number', min: 1, max: 7, style: { ...S.input, width: 140 }, value: daysPerWeekMax, onChange: (e) => changeCondition(setDaysPerWeekMax, e.target.value), placeholder: '每周最多天数' }),
-          h(Btn, { kind: 'ghost', onClick: load }, '刷新'))),
+          h(Btn, { kind: 'ghost', onClick: load }, '刷新'),
+          h(Btn, {
+            disabled: compareIds.length < 2,
+            onClick: () => {
+              setCompareError(null); setCompareOpen(true); setCompareData(null)
+              apiGet(`/jobs/compare?ids=${encodeURIComponent(compareIds.join(','))}`)
+                .then((res) => setCompareData(res))
+                .catch((err) => setCompareError(`对比失败：${err.message}`))
+            },
+          }, `对比选中（${compareIds.length}/5）`))),
       h('div', { style: { ...S.row, flexWrap: 'wrap', margin: '6px 0', justifyContent: 'space-between' } },
         h('div', { style: S.muted, role: 'status' }, loading ? '正在更新岗位…' : `本地全库符合 ${total} 条 · 本页 ${pageCount} 条 · 当前范围 ${pageCount ? pageOffset + 1 : 0}–${pageOffset + pageCount}；每页 ${limit} 条。`),
         h('div', { style: S.row },
@@ -1019,6 +1065,15 @@ function RadarTab({ focusCode, onChanged, onNavigate }) {
           h('input', { type: 'checkbox', checked: form.official, onChange: (e) => setForm({ ...form, official: e.target.checked }) }),
           '此信息来自官方招聘页（可更新招聘状态）'),
         h(Btn, { kind: 'primary', disabled: busy, onClick: saveJob }, busy ? '保存中…' : '保存岗位')))),
+
+    compareOpen
+      ? h(Modal, {
+        title: '岗位对比', subtitle: '逐字段对比，不给总分排名；未知表示记录里没有，不代表企业没提供。', width: 980,
+        onClose: () => { setCompareOpen(false); setCompareData(null); setCompareError(null) },
+      },
+        compareError ? h('div', { role: 'alert', style: { ...S.card, color: T.error } }, compareError) : null,
+        compareTable)
+      : null,
 
     detailOpen
       ? h(Modal, {

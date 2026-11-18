@@ -51,7 +51,7 @@ test('default table exposes all columns and cards retain facts and keyboard acce
   app.states[listIndex] = { jobs: [{ id: 'j1', title: '产品实习', company: '公司' }] }
   let tree = app.render()
   assert.ok(nodes(tree).find((n) => n.type === 'table'))
-  assert.deepEqual(nodes(tree).filter((n) => n.type === 'th').map(text), ['公司', '岗位', '类型', '城市', '状态', '截止', 'JD', '核验 / 操作'])
+  assert.deepEqual(nodes(tree).filter((n) => n.type === 'th').map(text), ['对比', '公司', '岗位', '类型', '城市', '状态', '截止', 'JD', '核验 / 操作'])
   nodes(tree).find((n) => n.type === 'Btn' && text(n) === '卡片').props.onClick()
   tree = app.render(); assert.match(text(tree), /薪酬 未知/); assert.match(text(tree), /来源 未知/)
   const card = nodes(tree).find((n) => n.props.role === 'button'); assert.equal(card.props.tabIndex, 0)
