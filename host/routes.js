@@ -31,6 +31,7 @@ import {buildApplicationCalendar} from './application-calendar.js'
 import {compareJobs} from './job-compare.js'
 import {aggregateClaims} from './claim-aggregate.js'
 import {deleteKnowledgeCascade} from './knowledge-delete.js'
+import {readResearchBudget, updateResearchBudget} from './research-settings.js'
 import { capturePageJson, openForLogin } from './browser.js'
 import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
@@ -381,6 +382,13 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
   })
 
   route('POST', '/site/capture', ({ body }) => captureSite(body, { config, repos, panel, logger }))
+  route('GET', '/research/settings', () => ({ ok: true, ...readResearchBudget(repos.db) }))
+  route('POST', '/research/settings', ({ body }) => {
+    const result = updateResearchBudget(repos.db, body ?? {})
+    if (result.ok) panel.publish({ kind: 'sources' })
+    return result
+  })
+
   route('POST', '/research/start', ({body}) => researchTasks.start(body))
   route('GET', '/research/tasks', ({query}) => researchTasks.list({limit:query.get('limit')}))
   route('GET', '/research/task', ({query}) => researchTasks.get(String(query.get('id'))))

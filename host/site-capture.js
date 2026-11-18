@@ -4,6 +4,7 @@ import { fetchJdDetail, resolveJdProvider } from './jd.js'
 import {captureNowcoder} from './nowcoder.js'
 import {processKnowledgeOcr} from './ocr.js'
 import {ResearchBudget,boundedResearch} from './research-budget.js'
+import {readResearchBudget} from './research-settings.js'
 import { classifyRecruitType, filterByRecruitType, getSiteProfile, normalizeRecruitType } from './sites.js'
 
 const sourceForSite = (site) => ({boss:'job_board','51job':'job_board',xhs:'social_platform',offershow:'offershow'})[site]
@@ -55,7 +56,9 @@ export async function fetchXhsNoteBody(item, {dataDir,budget,signal,captureJson 
 }
 
 export async function captureSite(args = {}, deps = {}) {
-  const budget=deps.budget??new ResearchBudget({maxVisits:6,timeoutMs:90000,signal:deps.signal})
+  // Direct (non-managed) calls still respect the saved budget and its safety ceiling.
+  const saved = deps.repos?.db ? readResearchBudget(deps.repos.db).settings : null
+  const budget=deps.budget??new ResearchBudget({maxVisits:saved?.maxVisits??6,timeoutMs:saved?.timeoutMs??90000,signal:deps.signal})
   const config=deps.config
   const capture=deps.captureJson??capturePageJson, detail=deps.fetchDetail??fetchJdDetail, note=deps.fetchNoteBody??fetchXhsNoteBody
   const run=()=>captureSiteInternal(args,{...deps,budget,

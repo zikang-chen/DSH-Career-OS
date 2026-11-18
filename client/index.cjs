@@ -2184,6 +2184,22 @@ function SettingsTab({ bootstrap, onChanged }) {
   const [deleteToken, setDeleteToken] = useState(null)
   const [sourceLogin, setSourceLogin] = useState(null)
   const [ruleForm, setRuleForm] = useState({ kind: 'job_deadline', name: '', url: '', company: '', withinDays: 7 })
+  const budget = useApi('/research/settings')
+  const [budgetForm, setBudgetForm] = useState(null)
+  useEffect(() => {
+    if (budget.data?.settings && !budgetForm) setBudgetForm(budget.data.settings)
+  }, [budget.data, budgetForm])
+  const budgetField = (key, label, unit) => h(Field, { label },
+    h('div', { style: S.row },
+      h('input', {
+        type: 'number', style: { ...S.input, width: 120 },
+        value: budgetForm?.[key] ?? '', min: budget.data?.minimums?.[key] ?? 0, max: budget.data?.safety?.[key] ?? undefined,
+        onChange: (e) => setBudgetForm({ ...budgetForm, [key]: e.target.value }),
+      }),
+      h('span', { style: S.muted }, `${unit} · 上限 ${budget.data?.safety?.[key] ?? '—'}`)))
+  const saveBudget = () => act(
+    () => apiPost('/research/settings', budgetForm ?? {}).then((res) => { if (res.ok) { budget.reload(); setBudgetForm(res.settings) } return res }),
+    '预算已保存。安全上限固定，本页与 Agent 都不能提高。')
 
   const act = (fn, msg) => fn().then((res) => { if (res?.ok === false) throw new Error(res.error || '操作未完成'); setError(null); setNotice(res.note || msg); onChanged?.(); return res }).catch((err) => setError(err.message))
   const loginSite = (site) => act(() => apiPost('/sources/login', { connector: site.key }), '已打开专用浏览器。登录资料只存本机；站点失效时仍需重新登录。')
@@ -2260,6 +2276,25 @@ function SettingsTab({ bootstrap, onChanged }) {
           bootstrap.runs.slice(0, 6).map((run) => h('div', { key: run.id, style: { ...S.mono } },
             `${fmtDate(run.started_at)} ${run.kind} · ${run.status}${run.error ? ` · ${String(run.error).slice(0, 60)}` : ` · 抓取 ${run.fetched}`}`)))
         : null),
+
+    h('div', { style: S.card },
+      h('div', { style: S.h2 }, '采集预算'),
+      h('div', { style: { ...S.muted, marginBottom: 8 } }, '控制研究/采集一次能走多远：访问次数、单次时限、同时任务数与预览缓存时效。你也可以直接让 Agent 调 career_research_budget 修改；安全上限由系统固定，页面和 Agent 都不能提高。'),
+      budget.loading ? h(Loading) : budget.error ? h(ErrorBox, { error: budget.error, onRetry: budget.reload })
+        : budgetForm ? h('div', null,
+          h('div', { style: S.grid(220) },
+            budgetField('maxVisits', '每次最多访问次数', '次'),
+            budgetField('timeoutMs', '单次时限', '毫秒'),
+            budgetField('maxConcurrent', '同时执行任务数', '个'),
+            budgetField('cacheTtlMs', '预览缓存时效', '毫秒')),
+          h('div', { style: { ...S.row, marginTop: 8 } },
+            h(Btn, { kind: 'primary', onClick: saveBudget }, '保存预算'),
+            h(Btn, { kind: 'ghost', onClick: () => setBudgetForm(budget.data?.defaults ?? null) }, '恢复默认'),
+            h('span', { style: S.muted }, `安全上限：${JSON.stringify(budget.data?.safety ?? {})}`)),
+          (budget.data?.clamped ?? []).length
+            ? h('div', { style: { ...S.muted, color: T.warn, marginTop: 6 } }, `有 ${budget.data.clamped.length} 项历史值超过上限，已按上限生效。`)
+            : null) : h(Loading),
+      budget.data?.note ? h('div', { style: { ...S.muted, fontSize: 11 } }, budget.data.note) : null),
 
     h('div', { style: S.card },
       h('div', { style: S.h2 }, '数据与隐私'),

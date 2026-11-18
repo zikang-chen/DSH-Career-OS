@@ -23,6 +23,7 @@ import {withJobListEvidence} from './job-list-evidence.js'
 import {ResearchBudget} from './research-budget.js'
 import {buildToday,updateTodayTask} from './today.js'
 import {deleteKnowledgeCascade} from './knowledge-delete.js'
+import {readResearchBudget,updateResearchBudget,RESEARCH_BUDGET_SAFETY,RESEARCH_BUDGET_DEFAULTS} from './research-settings.js'
 import { STALE_DAYS, captureFreshness, diffCaptures, diffJdSnapshots, scopeKeyOf } from './repo/captures.js'
 import { buildRetrievalGuide, guideInline } from './guide.js'
 import { installPdfLibs, runtimeHealth } from './runtime.js'
@@ -91,6 +92,16 @@ export function registerCareerTools(ctx, deps) {
     }
     if(action!=='list')throw new Error('action必须list/get/update/stats/delete')
     return {ok:true,...repos.knowledge.list(args),stats:repos.knowledge.stats()}
+  }}))
+  add(makeTool({name:'career_research_budget',description:'研究/爬取预算：查看或调整默认访问次数、单次时限、并发数与缓存时效。调整在安全上限内生效并持久保存；安全上限固定，本工具不能提高。',params:{action:S('get|set，默认 get'),maxVisits:N('每次研究最多访问次数'),timeoutMs:N('单次研究时限（毫秒）'),maxConcurrent:N('同时执行的研究任务数'),cacheTtlMs:N('相同条件预览复用时效（毫秒，0=不复用）')},handler:(args)=>{
+    const action=args.action??'get'
+    if(action==='get'){const r=readResearchBudget(repos.db);return {ok:true,...r,note:'当前生效值与安全上限；调整用 action=set。上限不可通过本工具提高。'}}
+    if(action!=='set')throw new Error('action必须 get 或 set')
+    const patch={};for(const key of ['maxVisits','timeoutMs','maxConcurrent','cacheTtlMs'])if(args[key]!==undefined)patch[key]=args[key]
+    if(!Object.keys(patch).length)return {ok:false,error:'set 需要至少一个预算字段',safety:RESEARCH_BUDGET_SAFETY,defaults:RESEARCH_BUDGET_DEFAULTS}
+    const result=updateResearchBudget(repos.db,patch)
+    if(result.ok)panel.publish({kind:'sources'})
+    return result
   }}))
   add(makeTool({name:'career_knowledge_ocr',description:'对知识库关联图片执行本机OCR并保留原图哈希/逐图结果。识别默认待人工核对；不上传第三方、不覆盖作者正文。',params:{action:S('status|recognize|agent_prepare|agent_save；agent_prepare后必须read_image再保存；人工确认仅在界面'),id:S('知识库资料id'),index:N('图片序号，从1开始'),text:S('Agent实际看图后的逐字转录，不清楚标〔无法辨认〕')},handler:(args)=>args.action==='status'?ocrStatus({dataDir:config.dataDir}):args.action==='review'?{ok:false,error:'人工核对仅限用户在知识库界面确认，Agent不能代确认'}:processKnowledgeOcr({...args,action:args.action??'recognize'},{repos,config})}))
 
@@ -1360,7 +1371,8 @@ export function registerCareerTools(ctx, deps) {
       recruitType: S('campus/social/intern'), site: S('库外JD搜索平台：boss或51job，默认boss'),
     },
     handler: async (args) => {
-      const budget=new ResearchBudget({maxVisits:6,timeoutMs:90000})
+      const savedBudget=readResearchBudget(repos.db).settings
+      const budget=new ResearchBudget({maxVisits:savedBudget.maxVisits,timeoutMs:savedBudget.timeoutMs})
       let job=args.jobId?repos.jobs.getJob(String(args.jobId)):null
       const company=str(args.company,120)??job?.company_name
       const title=str(args.title,200)??job?.title
