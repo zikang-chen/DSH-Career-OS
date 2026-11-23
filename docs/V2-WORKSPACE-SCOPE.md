@@ -39,6 +39,9 @@ workspaceRoots: []               # 例：["D:\\career_os", "D:\\career_os_work"]
 
 - 单元测试 7 项：root 自身/子目录匹配、兄弟目录不误判、大小写与结尾斜杠、默认根、cwd 未知时放行、跨工作区隐藏、服务缺失或抛错时放行、配置可关闭。
 - 插件重载后日志确认生效：`career workspace scope {"mode":"scoped","roots":["D:\\career_os"]}`。
+- 真实会话判定也确认了：一次工具步进后日志出现
+  `career scope resolved {"cwd":"D:\\career_os","inCareer":true,"roots":["D:\\career_os"]}`
+  ——说明会话的 `header.cwd` 确实被读到，且判定为在 CareerOS 工作区内。
 - 全量回归 471 项通过。
 
 ## 没验证到的

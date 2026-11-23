@@ -39,13 +39,19 @@ export function buildWorkspaceGuard({ ctx, config, packageRoot, logger }) {
   if (!sessions?.get) return { when: undefined, reason: 'no-sessions-service' }
   const roots = resolveScopeRoots(config, packageRoot)
   let warned = false
+  let announced = false
   const when = (context) => {
     try {
       const session = sessions.get(context?.agent?.id)
       const cwd = session?.header?.cwd
       // Unknown cwd (brand-new session, restored header without cwd) keeps the tools available.
       if (!cwd) return true
-      return isUnder(cwd, roots)
+      const inCareer = isUnder(cwd, roots)
+      if (!announced) {
+        announced = true
+        logger?.info?.('career scope resolved', { cwd, inCareer, roots })
+      }
+      return inCareer
     } catch (err) {
       if (!warned) {
         warned = true
