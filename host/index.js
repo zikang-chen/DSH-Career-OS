@@ -17,6 +17,7 @@ import { registerCareerTools } from './tools.js'
 import { registerRoutes, API_PREFIX } from './routes.js'
 import { CONNECTOR_META } from './sources.js'
 import { nowIso } from './util.js'
+import { buildWorkspaceGuard } from './workspace-scope.js'
 
 export const name = 'dsh-career'
 export const inject = ['tools', 'webServer']
@@ -25,6 +26,9 @@ const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 
 const DEFAULTS = {
   dataDir: 'data',
+  // Only expose the career_* tools in sessions whose workspace is this plugin (or workspaceRoots).
+  onlyInCareerWorkspace: true,
+  workspaceRoots: [],
   httpGapMs: 2500,
   httpTimeoutMs: 20_000,
   panelOpen: false,
@@ -192,8 +196,10 @@ export function apply(ctx, rawConfig = {}) {
     logger.warn('could not hook tool activity', { error: String(err?.message ?? err) })
   }
 
-  const toolNames = registerCareerTools(ctx, { repos, config, monitor, panel, logger, exporter, webService, clientHealth })
-  const routes = registerRoutes({ webServer: ctx.webServer, repos, monitor, panel, exporter, config, logger, search, clientHealth, webService, db })
+  const scoped = buildWorkspaceGuard({ ctx, config, packageRoot: PACKAGE_ROOT, logger })
+  logger.info('career workspace scope', { mode: scoped.reason, roots: scoped.roots ?? null })
+  const toolNames = registerCareerTools(ctx, { repos, config, monitor, panel, logger, exporter, webService, clientHealth, scopeWhen: scoped.when })
+  const routes = registerRoutes({ webServer: ctx.webServer, repos, monitor, panel, exporter, config, logger, search, clientHealth, webService, db, workspaceScope: scoped })
 
   // ── scheduler (opt-in) ─────────────────────────────────────────────────────
   let scheduleTimer = null

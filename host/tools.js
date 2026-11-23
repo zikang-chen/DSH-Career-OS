@@ -69,9 +69,10 @@ const SA = (description) => ({ type: 'array', items: { type: 'string' }, descrip
 
 export function registerCareerTools(ctx, deps) {
   const { repos, config, monitor, panel, logger } = deps
+  const when = deps.scopeWhen
   const registered = []
   const add = (definition) => {
-    ctx.tools.register(definition)
+    ctx.tools.register(definition, when ? { when } : {})
     registered.push(definition.name)
   }
 

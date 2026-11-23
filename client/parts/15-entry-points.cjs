@@ -7,8 +7,55 @@ function readOpenState() {
   }
 }
 
+// Pull the active workspace path out of whichever snapshot shape the host hook provides.
+// Unknown shapes return null, and the caller keeps the button (fail-open) rather than
+// hiding a working entry point on a guess.
+function activeWorkspacePath(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null
+  const list = Array.isArray(snapshot.items) ? snapshot.items
+    : Array.isArray(snapshot.workspaces) ? snapshot.workspaces
+      : Array.isArray(snapshot.list) ? snapshot.list : []
+  const activeId = snapshot.activeId ?? snapshot.activeWorkspaceId ?? snapshot.selectedId
+    ?? snapshot.currentWorkspaceId ?? snapshot.current ?? null
+  const pick = (entry) => (entry && typeof entry === 'object' && typeof entry.path === 'string' ? entry.path : null)
+  if (Array.isArray(list) && list.length) {
+    if (activeId) {
+      const hit = list.find((w) => w && (w.workspaceId === activeId || w.id === activeId))
+      const path = pick(hit)
+      if (path) return path
+    }
+    const flagged = list.find((w) => w && (w.active === true || w.selected === true))
+    const flaggedPath = pick(flagged)
+    if (flaggedPath) return flaggedPath
+  }
+  const direct = snapshot.activePath ?? snapshot.currentPath ?? snapshot.path ?? snapshot.cwd
+  return typeof direct === 'string' ? direct : null
+}
+
+// CareerOS only belongs in its own workspace; re-check whenever the workspace changes.
+function useCareerWorkspace(useWorkspaces) {
+  const [state, setState] = useState({ checked: false, inCareer: true })
+  let snapshot = null
+  try {
+    snapshot = typeof useWorkspaces === 'function' ? useWorkspaces((value) => value) : null
+  } catch {
+    snapshot = null
+  }
+  const path = activeWorkspacePath(snapshot)
+  useEffect(() => {
+    if (!path) return
+    let alive = true
+    apiGet(`/scope?path=${encodeURIComponent(path)}`)
+      .then((res) => { if (alive) setState({ checked: true, inCareer: res?.inCareer !== false }) })
+      .catch(() => { if (alive) setState({ checked: false, inCareer: true }) })
+    return () => { alive = false }
+  }, [path])
+  return state
+}
+
 function FootAction(props) {
   const [open, setOpen] = useState(readOpenState)
+  const scope = useCareerWorkspace(props?.useWorkspaces)
   const wide = props?.wide === true
   const toggle = (next) => {
     setOpen(next)
@@ -17,6 +64,14 @@ function FootAction(props) {
     } catch {
       /* storage may be unavailable */
     }
+  }
+  // Outside the career workspace: render nothing (and close an already-open panel).
+  if (scope.checked && !scope.inCareer) {
+    if (open) {
+      try { window.localStorage.setItem('careeros:open', '0') } catch { /* ignore */ }
+      setOpen(false)
+    }
+    return null
   }
   return h('div', null,
     h('button', {

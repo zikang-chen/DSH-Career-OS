@@ -32,6 +32,7 @@ import {compareJobs} from './job-compare.js'
 import {aggregateClaims} from './claim-aggregate.js'
 import {deleteKnowledgeCascade} from './knowledge-delete.js'
 import {readResearchBudget, updateResearchBudget} from './research-settings.js'
+import {isUnder} from './workspace-scope.js'
 import { capturePageJson, openForLogin } from './browser.js'
 import { describeJsonShape } from './curl.js'
 import { buildBrief, buildPlan } from './plan.js'
@@ -93,7 +94,7 @@ function assertSameOrigin(req) {
   }
 }
 
-export function registerRoutes({ webServer, repos, monitor, panel, exporter, config, logger, search, clientHealth, webService, db }) {
+export function registerRoutes({ webServer, repos, monitor, panel, exporter, config, logger, search, clientHealth, webService, db, workspaceScope }) {
   const researchTasks=createResearchTasks({repos,config,panel,logger})
   const routes = []
   const route = (method, pattern, handler) => {
@@ -183,6 +184,18 @@ export function registerRoutes({ webServer, repos, monitor, panel, exporter, con
         application:repos.db.get('SELECT id,status FROM application WHERE job_id=? AND archived=0 ORDER BY created_at DESC LIMIT 1',[j.id])??null,
       })),
     }
+  })
+
+  route('GET', '/scope', ({query}) => {
+    const roots = workspaceScope?.roots ?? [path.resolve(config.dataDir, '..')]
+    const sessionId = query.get('sessionId')
+    if (sessionId) {
+      const cwd = workspaceScope?.resolveCwd?.(sessionId) ?? null
+      return { ok: true, sessionId, cwd, inCareer: cwd ? isUnder(cwd, roots) : null, roots, reason: cwd ? 'resolved' : 'cwd-unknown-fail-open' }
+    }
+    const value = query.get('path')
+    if (!value) return { ok: true, inCareer: true, roots, reason: 'no-path-provided' }
+    return { ok: true, inCareer: isUnder(value, roots), roots, path: value }
   })
 
   route('GET', '/jobs/compare', ({ query }) => compareJobs(repos, { ids: (query.get('ids') ?? '').split(','), profile: repos.profile.getWithResume() }))
